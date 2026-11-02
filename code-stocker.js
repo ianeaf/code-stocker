@@ -162,7 +162,7 @@
       g.forEach(function (x) {
         if (!x.rep && leaf(x.el)) { if (!loose) { loose = { key: 'loose' + blocks.length, title: 'Content', nodes: [] }; blocks.push(loose); } x.nodes.forEach(function (n) { loose.nodes.push(n); }); return; }
         loose = null;
-        blocks.push({ key: pathOf(x.el).join('/'), title: x.rep ? x.nodes[0].label : (pretty(x.el) || (x.el.attrs.id ? attr(src, x.el, 'id') : '')), nodes: x.nodes });
+        blocks.push({ el: x.rep ? null : x.el, key: pathOf(x.el).join('/'), title: x.rep ? x.nodes[0].label : (pretty(x.el) || (x.el.attrs.id ? attr(src, x.el, 'id') : '')), nodes: x.nodes });
       });
       blocks.forEach(function (b) { b.sub = firstSnippet(b.nodes); b.count = count(b.nodes); if (!b.title) b.title = b.sub || 'Section'; if (b.title === b.sub) b.sub = ''; });
       return blocks;
@@ -347,6 +347,12 @@
     '.sqf-th:hover span,.sqf-th:focus-visible span{opacity:1}',
     '.sqf-th:hover{box-shadow:inset 0 0 0 2px #111}',
     '.sqf [hidden]{display:none!important}',
+    '.sqf .g{color:#aaa;font-size:11px;letter-spacing:-2px;opacity:0;transition:opacity .1s;width:10px;flex:none;cursor:grab;user-select:none}',
+    '.sqf-bh:hover .g,.sqf-it>summary:hover .g{opacity:1}',
+    '.sqf-grab{cursor:grab}.sqf-grab:active{cursor:grabbing}',
+    '.sqf .dragging{opacity:.45}',
+    '.sqf .drop-before{box-shadow:0 -2px 0 0 #111}.sqf .drop-after{box-shadow:0 2px 0 0 #111}',
+    '.sqf.drag-blocks .sqf-bb{display:none!important}.sqf.drag-items .sqf-in{display:none!important}',
     '.sqf-blk{border:1px solid #e3e3e3;border-radius:var(--r,4px);margin-top:10px;background:#fff}',
     '.sqf-bh{display:flex;width:100%;align-items:center;gap:8px;background:none;border:0;padding:10px 12px;cursor:pointer;font:inherit;text-align:left;color:inherit}',
     '.sqf-bh .a{font-size:10px;transition:transform .12s;color:#555}.sqf-blk.on>.sqf-bh .a{transform:rotate(90deg)}',
@@ -395,7 +401,7 @@
     S.panel = panel; S.body = body; S.status = status; S.search = search;
     var host = canNest(S.dialog) ? S.dialog : SD.body;
     host.appendChild(panel);
-    ['mousedown', 'mouseup', 'click', 'dblclick', 'pointerdown', 'pointerup', 'touchstart', 'touchend', 'keydown', 'keyup', 'keypress', 'focusin', 'focusout', 'contextmenu'].forEach(function (t) {
+    ['mousedown', 'mouseup', 'click', 'dblclick', 'pointerdown', 'pointerup', 'touchstart', 'touchend', 'keydown', 'keyup', 'keypress', 'focusin', 'focusout', 'contextmenu', 'dragstart', 'dragenter', 'dragover', 'dragleave', 'drop', 'dragend'].forEach(function (t) {
       panel.addEventListener(t, function (e) { e.stopPropagation(); });      // keep Squarespace's outside-click / shortcut handlers blind to the panel
     });
   }
@@ -753,13 +759,19 @@
       var dn = h('button', { type: 'button', class: 'sqf-ib', text: '↓', 'aria-label': 'Move down', disabled: editOnly || idx === n - 1, onclick: function (e) { e.preventDefault(); e.stopPropagation(); move(ipaths, idx, 1); } });
       var rm = h('button', { type: 'button', class: 'sqf-ib', text: '×', 'aria-label': 'Remove', disabled: editOnly || n < 2, onclick: function (e) { e.preventDefault(); e.stopPropagation(); remove(ipaths, idx); } });
       var det = h('details', { class: 'sqf-it', 'data-k': key }, [
-        h('summary', {}, [h('span', { class: 'k', text: idx + 1 }), h('span', { class: 'n', text: title || 'Item ' + (idx + 1) }), editOnly ? null : up, editOnly ? null : dn, editOnly ? null : rm]),
+        h('summary', {}, [editOnly ? null : h('span', { class: 'g', text: '⋮⋮', title: 'Drag to reorder' }), h('span', { class: 'k', text: idx + 1 }), h('span', { class: 'n', text: title || 'Item ' + (idx + 1) }), editOnly ? null : up, editOnly ? null : dn, editOnly ? null : rm]),
         h('div', { class: 'sqf-in' }, renderNodes(it.nodes, src, root))
       ]);
       if (S.open[key] !== false && (S.open[key] || n <= 3 && idx === 0)) det.open = true;
       det.addEventListener('toggle', function () { S.open[key] = det.open; });
       box.appendChild(det);
     });
+    if (!editOnly && n > 1) {
+      var dets = Array.prototype.slice.call(box.querySelectorAll('details.sqf-it'));
+      dnd(dets.map(function (d) { return { el: d, handle: d.firstChild }; }), function (f, t) {
+        apply(function (s2, r2) { return reorderEls(s2, r2, ipaths, f, t); }); render();
+      }, 'drag-items');
+    }
     if (!editOnly) box.appendChild(h('button', { type: 'button', class: 'sqf-btn', text: '+ Add item', onclick: function () { addItem(ipaths); } }));
     return box;
   }
@@ -773,6 +785,51 @@
       if (nd.type === 'link') return linkField(nd, src);
       if (nd.type === 'image') return imageField(nd, src);
       return repeaterView(nd, src, root);
+    });
+  }
+
+  /* reorder: sibling elements keep their slots in the file; only their contents are permuted */
+  function reorderEls(src, root, paths, from, to) {
+    var els = paths.map(function (p) { return find(root, p); });
+    if (els.some(function (e) { return !e; })) return null;
+    var order = els.map(function (e, i) { return i; }); order.splice(to, 0, order.splice(from, 1)[0]);
+    var texts = els.map(function (e) { return src.slice(e.start, e.end); }), out = src.slice(0, els[0].start);
+    for (var i = 0; i < els.length; i++) { out += texts[order[i]]; if (i < els.length - 1) out += src.slice(els[i].end, els[i + 1].start); }
+    return out + src.slice(els[els.length - 1].end);
+  }
+  function orderCheck(src, root, els) {                         // reasons reordering would change more than order
+    var rules = cssRules(root, src);
+    for (var r = 0; r < rules.length; r++) for (var q = 0; q < rules[r].sels.length; q++) {
+      var sel = rules[r].sels[q], pos = /:(nth-child|nth-of-type|nth-last-child|nth-last-of-type|first-child|last-child|only-child|first-of-type|last-of-type)/.exec(sel);
+      if (pos && els.some(function (e) { return refersTo(sel, src, e); })) return 'the CSS styles these by position (:' + pos[1] + ')';
+    }
+    return '';
+  }
+  /* drag & drop sorting. items: [{el, handle}]. onMove(from, to) gets final indices. */
+  function dnd(items, onMove, cls) {
+    var from = -1;
+    function clear() { items.forEach(function (it) { it.el.classList.remove('dragging', 'drop-before', 'drop-after'); }); S.panel.classList.remove(cls); from = -1; }
+    items.forEach(function (it, i) {
+      it.handle.draggable = true; it.handle.classList.add('sqf-grab');
+      it.handle.addEventListener('dragstart', function (e) {
+        from = i; e.dataTransfer.effectAllowed = 'move'; try { e.dataTransfer.setData('text/plain', 'code-stocker'); } catch (x) {}
+        try { e.dataTransfer.setDragImage(it.handle, 20, 14); } catch (x) {}
+        setTimeout(function () { it.el.classList.add('dragging'); S.panel.classList.add(cls); }, 0);   // collapse bodies after the drag image is taken
+      });
+      it.handle.addEventListener('dragend', clear);
+      it.el.addEventListener('dragover', function (e) {
+        if (from < 0) return;
+        e.preventDefault(); e.dataTransfer.dropEffect = 'move';
+        var r = it.el.getBoundingClientRect(), after = e.clientY > r.top + r.height / 2;
+        items.forEach(function (o) { o.el.classList.remove('drop-before', 'drop-after'); });
+        it.el.classList.add(after ? 'drop-after' : 'drop-before');
+      });
+      it.el.addEventListener('drop', function (e) {
+        if (from < 0) return; e.preventDefault(); e.stopPropagation();
+        var r = it.el.getBoundingClientRect(), after = e.clientY > r.top + r.height / 2, to = i + (after ? 1 : 0), f = from;
+        if (f < to) to--; clear();
+        if (to !== f) onMove(f, to);
+      });
     });
   }
 
@@ -819,18 +876,39 @@
     var blocks = nodes.blocks || [], total = blocks.reduce(function (a, b) { return a + b.count; }, 0);
     if (blocks.length >= 2 && (total > 8 || blocks.length > 3)) {          // long code: one section open at a time
       if (!blocks.some(function (b) { return b.key === S.blk; }) && S.blk !== '') S.blk = blocks[0].key;
+      var boxes = [];
       blocks.forEach(function (b) {
-        var bh = h('button', { type: 'button', class: 'sqf-bh', 'aria-expanded': b.key === S.blk }, [
+        var bh = h('div', { role: 'button', tabindex: 0, class: 'sqf-bh', 'aria-expanded': b.key === S.blk }, [
+          b.el ? h('span', { class: 'g', text: '⋮⋮', title: 'Drag to reorder' }) : null,
           h('span', { class: 'a', text: '▸' }),
           h('span', { class: 't' }, [b.title, b.sub ? h('span', { class: 's', text: b.sub }) : null]),
           h('span', { class: 'c', text: b.count })]);
         var box = h('div', { class: 'sqf-blk' + (b.key === S.blk ? ' on' : ''), 'data-k': b.key }, [bh, h('div', { class: 'sqf-bb' }, renderNodes(b.nodes, S.src, root))]);
+        bh.addEventListener('keydown', function (e) { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); bh.click(); } });
         bh.addEventListener('click', function () {
           S.blk = S.blk === b.key ? '' : b.key;
           Array.prototype.forEach.call(S.body.querySelectorAll('.sqf-blk'), function (x) { var on = x.getAttribute('data-k') === S.blk; x.classList.toggle('on', on); x.firstChild.setAttribute('aria-expanded', on); });
         });
-        S.body.appendChild(box);
+        S.body.appendChild(box); boxes.push(box);
       });
+      var mv = blocks.map(function (b, i) { return { b: b, box: boxes[i] }; }).filter(function (x) { return x.b.el; });
+      if (mv.length >= 2) {
+        var why = orderCheck(S.src, root, mv.map(function (x) { return x.b.el; }));
+        if (why) mv.forEach(function (x) { var g = x.box.querySelector('.sqf-bh .g'); if (g) g.remove(); });
+        if (why) S.body.insertBefore(h('div', { class: 'sqf-note', text: 'Reordering sections is off because ' + why + '.' }), S.notice && S.notice.parentNode === S.body ? S.notice.nextSibling : S.body.firstChild);
+        else {
+          var bpaths = mv.map(function (x) { return pathOf(x.b.el); });
+          dnd(mv.map(function (x) { return { el: x.box, handle: x.box.firstChild }; }), function (f, t) {
+            var cur = S.blk, curIdx = bpaths.map(function (p) { return p.join('/'); }).indexOf(cur);
+            apply(function (s2, r2) { return reorderEls(s2, r2, bpaths, f, t); });
+            if (curIdx > -1) {                                      // keep the open section open after it moves
+              var ord = bpaths.map(function (p, i) { return i; }); ord.splice(t, 0, ord.splice(f, 1)[0]);
+              S.blk = bpaths[ord.indexOf(curIdx)].join('/');
+            }
+            render();
+          }, 'drag-blocks');
+        }
+      }
     } else renderNodes(nodes, S.src, root).forEach(function (n) { S.body.appendChild(n); });
     applyFilter(); S.body.scrollTop = scroll;
   }

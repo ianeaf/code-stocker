@@ -437,6 +437,55 @@
     S.src = ns; queueWrite(); return true;
   }
 
+  /* ── inner-text editing ──
+     The box shows only what a person reads. Structural whitespace and empty decorative elements (e.g. <span class="dot"></span>)
+     at either end are kept out of the box and restored untouched. Attributes of inline tags (class, href…) are hidden in the box
+     and put back on write, so typing can never land "inside" a class or alter one. */
+  var EMPTY_FIRST = /^<(span|i|b|em|strong|u)\b[^>]*>\s*<\/\1\s*>/i, EMPTY_LAST = /<(span|i|b|em|strong|u)\b[^>]*>\s*<\/\1\s*>$/i;
+  function splitInner(raw) {
+    var lead = /^\s*/.exec(raw)[0], rest = raw.slice(lead.length), m;
+    while ((m = EMPTY_FIRST.exec(rest))) { var w = /^\s*/.exec(rest.slice(m[0].length))[0]; lead += m[0] + w; rest = rest.slice(m[0].length + w.length); }
+    var trail = '';
+    for (;;) {
+      var changed = false, t = /\s*$/.exec(rest)[0];
+      if (t) { trail = t + trail; rest = rest.slice(0, rest.length - t.length); changed = true; }
+      m = EMPTY_LAST.exec(rest);
+      if (m) { trail = m[0] + trail; rest = rest.slice(0, rest.length - m[0].length); changed = true; }
+      if (!changed) break;
+    }
+    return { lead: lead, core: rest, trail: trail };
+  }
+  var RE_START = /<([a-zA-Z][\w-]*)(\s[^>]*?)?(\/?)>/g;
+  function toDisplay(core) {
+    return core.replace(RE_START, function (m, n, a) { return a && /[^\s\/]/.test(a) ? '<' + n + '>' : m; }).replace(/\s*\n\s*/g, ' ');
+  }
+  function fromDisplay(value, origCore) {                       // bare tags take their original attributes back, in order
+    var q = {}; origCore.replace(RE_START, function (m, n) { (q[n.toLowerCase()] = q[n.toLowerCase()] || []).push(m); return m; });
+    return value.replace(/<([a-zA-Z][\w-]*)>/g, function (m, n) { var l = q[n.toLowerCase()]; return l && l.length ? l.shift() : m; });
+  }
+  function bindInner(ctl, path, onErr) {
+    var ws = { lead: '', trail: '' };
+    function sync(src, root) {
+      var e = find(root, path); if (!e) return '';
+      var sp = splitInner(src.slice(e.innerStart, e.innerEnd)); ws.lead = sp.lead; ws.trail = sp.trail;
+      return toDisplay(sp.core);
+    }
+    ctl.value = sync(S.src, parse(S.src));
+    ctl.addEventListener('input', function () {
+      var e = find(parse(S.src), path); if (!e) return;
+      var cur = splitInner(S.src.slice(e.innerStart, e.innerEnd)).core, restored = fromDisplay(ctl.value, cur);
+      var msg = lintText(restored, e, S.src);
+      ctl.classList.toggle('inv', !!msg); if (onErr) onErr(msg);
+      if (msg) return;
+      apply(function (s2, r2) { var e2 = find(r2, path); return e2 ? splice(s2, e2.innerStart, e2.innerEnd, ws.lead + restored + ws.trail) : null; });
+      refresh();
+    });
+    ctl.addEventListener('blur', function () {                   // accidental leading/trailing spaces never reach the code
+      var t = ctl.value.replace(/^\s+|\s+$/g, ''); if (t !== ctl.value) { ctl.value = t; ctl.dispatchEvent(new shell.Event('input', { bubbles: true })); }
+    });
+    track(ctl, sync);
+  }
+
   function lintText(value, el, src) {
     if (/<!|<\?/.test(value)) return 'Comments and declarations are not allowed here.';
     var had = {}; (function w(e) { e.children.forEach(function (c) { had[c.tag] = 1; w(c); }); })(el);
@@ -450,7 +499,6 @@
   function textField(node, src) {
     var el = node.el, label = TEXT[el.tag] + (el.tag === 'p' ? (/sqsrte-large/.test(attr(src, el, 'class')) ? ' · Large' : /sqsrte-small/.test(attr(src, el, 'class')) ? ' · Small' : '') : '');
     var path = node.path;
-    function coreOf(s, root) { var e = find(root, path); if (!e) return ''; return s.slice(e.innerStart, e.innerEnd).trim(); }
     var ta = h('textarea', { rows: 1, 'aria-label': label });
     var err = h('div', { class: 'sqf-err', hidden: true });
     function fit() {                                              // only measurable while visible; re-run whenever a section opens
@@ -459,21 +507,8 @@
       ta.style.height = Math.max(34, Math.min(sh, 260)) + 'px'; ta.style.overflowY = sh > 260 ? 'auto' : 'hidden';
     }
     ta.__fit = fit;
-    ta.value = coreOf(src, parse(src));
-    ta.addEventListener('input', function () {
-      var root = parse(S.src), e = find(root, path); if (!e) return;
-      var msg = lintText(ta.value, e, S.src);
-      ta.classList.toggle('inv', !!msg); err.hidden = !msg; err.textContent = msg;
-      fit();
-      if (msg) return;
-      apply(function (s, r) {
-        var e2 = find(r, path); if (!e2) return null;
-        var raw = s.slice(e2.innerStart, e2.innerEnd), lead = /^\s*/.exec(raw)[0], trail = /\s*$/.exec(raw.slice(lead.length))[0];
-        return splice(s, e2.innerStart, e2.innerEnd, lead + ta.value + trail);
-      });
-      refresh();
-    });
-    track(ta, function (s, r) { return coreOf(s, r); });
+    bindInner(ta, path, function (msg) { err.hidden = !msg; err.textContent = msg; });
+    ta.addEventListener('input', fit);
     var wrap = h('div', { class: 'sqf-f', 'data-kind': 'text' }, [h('label', { class: 'sqf-l', text: label }), ta, err]);
     wrap.__q = function () { return label + ' ' + ta.value; };
     requestAnimationFrame(fit);
@@ -496,14 +531,7 @@
     var lab;
     if (labelOK) {
       lab = h('input', { type: 'text', 'aria-label': 'Link label' });
-      var lget = function (s, r) { var e = find(r, path); return e ? s.slice(e.innerStart, e.innerEnd) : ''; };
-      lab.value =lget(src, parse(src));
-      lab.addEventListener('input', function () {
-        var e = find(parse(S.src), path); if (!e) return;
-        var msg = lintText(lab.value, e, S.src); lab.classList.toggle('inv', !!msg); if (msg) return;
-        apply(function (s, r) { var e2 = find(r, path); return e2 ? splice(s, e2.innerStart, e2.innerEnd, lab.value) : null; }); refresh();
-      });
-      track(lab, lget);
+      bindInner(lab, path);
       kids.push(h('label', { class: 'sqf-l', text: 'Label' }), lab);
     }
     var sw = h('button', { type: 'button', class: 'sqf-sw', role: 'switch', 'aria-label': 'Open in new tab' });
@@ -731,8 +759,9 @@
       var esc = function (v) { return v.replace(/"/g, '&quot;'); }, tag = '<img src="' + esc(url) + '" alt="' + esc(alt) + '">';
       var tops = root.children.filter(function (c) { return c.tag !== 'style' && c.tag !== 'script'; });
       if (!tops.length) return src + (src && !/\n$/.test(src) ? '\n' : '') + tag + '\n';
-      var last = tops[tops.length - 1];
-      return splice(src, last.innerEnd, last.innerEnd, '\n  ' + tag + '\n');
+      var last = tops[tops.length - 1], at = last.innerEnd, ls = src.lastIndexOf('\n', at - 1) + 1, indent = /^[ \t]*/.exec(src.slice(ls, at))[0];
+      if (ls > last.innerStart - 1 && /^[ \t]*$/.test(src.slice(ls, at))) return splice(src, ls, ls, indent + '  ' + tag + '\n');   // closing tag sits on its own line
+      return splice(src, at, at, tag);
     });
   }
   function addImage(file) {

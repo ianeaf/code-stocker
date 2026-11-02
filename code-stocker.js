@@ -98,17 +98,6 @@
   }
   function removeAttr(src, el, name) { var a = el.attrs[name]; return a ? splice(src, a.start, a.end, '') : src; }
 
-  /* block name — stored as an HTML comment on the first line, invisible on the live site */
-  var RE_NAME_C = /^\s*<!--\s*(?:code-stocker|sqf):\s*([\s\S]*?)\s*-->[ \t]*\n?/;
-  function getName(src) { var m = RE_NAME_C.exec(src); return m ? m[1] : ''; }
-  function setName(src, name) {
-    name = name.replace(/-{2,}/g, '-').replace(/[<>\r\n]/g, ' ');
-    var has = RE_NAME_C.test(src);
-    if (!name.trim()) return has ? src.replace(RE_NAME_C, '') : src;
-    var c = '<!-- code-stocker: ' + name + ' -->\n';
-    return has ? src.replace(RE_NAME_C, function () { return c; }) : c + src;
-  }
-
   /* ───────────────────────── 3. Field detection ───────────────────────── */
   var TEXT = { h1: 'Heading 1', h2: 'Heading 2', h3: 'Heading 3', h4: 'Heading 4', p: 'Paragraph', li: 'List item', button: 'Button label', summary: 'Question', figcaption: 'Caption' };
   var INLINE = { strong: 1, em: 1, b: 1, i: 1, a: 1, br: 1, span: 1, u: 1 };
@@ -273,8 +262,6 @@
     '.sqf-top{background:#FFD60A;color:#111;padding:12px 16px 12px;border-bottom:1px solid #111}',
     '.sqf-top .r{display:flex;justify-content:space-between;align-items:baseline}',
     '.sqf .sqf-top .sqf-s{color:#111;opacity:.7}.sqf .sqf-top .sqf-s.bad{color:#8a0000;opacity:1}',
-    '.sqf .sqf-name{margin-top:8px;background:rgba(255,255,255,.55);border-color:#111!important;font-weight:600}',
-    '.sqf .sqf-name::placeholder{color:#444;font-weight:400}',
     '.sqf-t{font-size:11px;letter-spacing:.12em;text-transform:uppercase;font-weight:700}',
     '.sqf-s{font-size:11px;color:#777}.sqf-s.bad{color:#b3261e}',
     '.sqf-tools{padding:10px 16px;border-bottom:1px solid #ececec}',
@@ -332,17 +319,13 @@
 
   function buildPanel() {
     var status = h('span', { class: 'sqf-s', text: 'Synced' });
-    var nameI = h('input', { type: 'text', class: 'sqf-name', placeholder: 'Name this block', 'aria-label': 'Block name', maxlength: 60 });
-    nameI.value = getName(S.src);
-    nameI.addEventListener('input', function () { S.src = setName(S.src, nameI.value); queueWrite(); });
-    S.nameI = nameI;
     var search = h('input', { type: 'text', placeholder: 'Search content', 'aria-label': 'Search content', oninput: function () { S.q = this.value.toLowerCase(); applyFilter(); } });
     var chips = h('div', { class: 'sqf-chips' }, ['all', 'text', 'link', 'image'].map(function (f) {
       return h('button', { class: 'sqf-chip', type: 'button', 'data-f': f, 'aria-pressed': f === 'all', text: f.charAt(0).toUpperCase() + f.slice(1), onclick: function () { S.filter = f; Array.prototype.forEach.call(chips.children, function (c) { c.setAttribute('aria-pressed', c.getAttribute('data-f') === f); }); applyFilter(); } });
     }));
     var body = h('div', { class: 'sqf-b' });
     var panel = h('div', { class: 'sqf', role: 'complementary', 'aria-label': 'Code Stocker' }, [
-      h('div', { class: 'sqf-top' }, [h('div', { class: 'r' }, [h('span', { class: 'sqf-t', text: 'Code Stocker' }), status]), nameI]),
+      h('div', { class: 'sqf-top' }, [h('div', { class: 'r' }, [h('span', { class: 'sqf-t', text: 'Code Stocker' }), status])]),
       h('div', { class: 'sqf-tools' }, [search, chips]),
       body,
       h('div', { class: 'sqf-foot', text: 'Edits update the editor. Nothing is live until you click Save.' })
@@ -579,12 +562,10 @@
     S.controls = []; S.body.textContent = ''; S.sig = signature(nodes);
     if (!nodes.length) S.body.appendChild(h('div', { class: 'sqf-empty', text: S.src.trim() ? 'No editable text, links or images found in this code.' : 'This Code Block is empty. Add HTML and its fields appear here.' }));
     renderNodes(nodes, S.src, root).forEach(function (n) { S.body.appendChild(n); });
-    if (S.nameI && S.nameI !== SD.activeElement) S.nameI.value = getName(S.src);
     applyFilter(); S.body.scrollTop = scroll;
   }
   function refresh() {                                            // in-place value sync; re-render only if structure moved
     src0 = S.src;
-    if (S.nameI && S.nameI !== SD.activeElement) S.nameI.value = getName(S.src);
     var root = parse(S.src), nodes = collectAll(S.src, root);
     if (signature(nodes) !== S.sig) { render(); return; }
     S.controls.forEach(function (c) {
@@ -681,29 +662,9 @@
   var onDbl = function (e) { var b = e.target.closest && e.target.closest('.sqs-block-codemodule'); if (b) S.lastBlock = b.id; };
   document.addEventListener('dblclick', onDbl, true);
   shell.addEventListener('resize', place);
-  /* name badges on the page, edit mode only */
-  var badgeCss = document.createElement('style');
-  badgeCss.textContent = '[data-sqf-rel]{position:relative}[data-sqf-name]::before{content:attr(data-sqf-name);position:absolute;top:0;left:0;z-index:9;background:#FFD60A;color:#111;font:600 10px/1 -apple-system,Helvetica,Arial,sans-serif;letter-spacing:.09em;text-transform:uppercase;padding:4px 7px;pointer-events:none}';
-  document.head.appendChild(badgeCss);
-  function badges() {
-    Array.prototype.forEach.call(document.querySelectorAll('.sqs-block-codemodule'), function (b) {
-      var c = b.querySelector('.sqs-code-module-container') || b, name = '';
-      try {
-        var it = document.createNodeIterator(c, 128), n;                // 128 = comment nodes
-        while ((n = it.nextNode())) { var m = /^\s*(?:code-stocker|sqf):\s*([\s\S]*?)\s*$/.exec(n.nodeValue); if (m) { name = m[1]; break; } }
-      } catch (e) {}
-      if (name) {
-        if (b.getAttribute('data-sqf-name') !== name) b.setAttribute('data-sqf-name', name);
-        if (!b.hasAttribute('data-sqf-rel') && window.getComputedStyle(b).position === 'static') b.setAttribute('data-sqf-rel', '');
-      } else { b.removeAttribute('data-sqf-name'); b.removeAttribute('data-sqf-rel'); }
-    });
-  }
-  var biv = setInterval(badges, 1000); badges();
   check();
 
   function dispose() {
-    clearInterval(biv); badgeCss.remove();
-    Array.prototype.forEach.call(document.querySelectorAll('[data-sqf-name]'), function (b) { b.removeAttribute('data-sqf-name'); b.removeAttribute('data-sqf-rel'); });
     mo.disconnect(); clearInterval(iv); closePanel(); styleEl.remove();
     document.removeEventListener('dblclick', onDbl, true); shell.removeEventListener('resize', place);
     delete shell.__codeStocker;

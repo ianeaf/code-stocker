@@ -475,26 +475,83 @@
     try { (shell.__codeStockerAssets ? shell.__codeStockerAssets() : []).forEach(function (a) { add(typeof a === 'string' ? a : a.url); }); } catch (e) {}
     return out;
   }
+  /* ── Real Asset Library (media-api.squarespace.com). Uses the editor's own login cookie + X-Library-Id. ── */
+  var LIB_KEY = 'codeStocker.libId', MEDIA = 'https://media-api.squarespace.com/';
+  function libIdFrom(u) { var m = /\/libraries\/([0-9a-f]{20,})/i.exec(u || ''); return m && m[1]; }
+  function rememberLib(id) { if (!id) return; S.libId = id; try { shell.localStorage.setItem(LIB_KEY, id); } catch (e) {} }
+  var origXHR = shell.XMLHttpRequest.prototype.open, origFetch = shell.fetch, myXHR, myFetch;
+  try {                                                         // passively learn the library id whenever Squarespace itself calls the media API
+    myXHR = function (m, u) { try { rememberLib(libIdFrom(String(u))); } catch (e) {} return origXHR.apply(this, arguments); };
+    myFetch = function (a) { try { rememberLib(libIdFrom(typeof a === 'string' ? a : a && a.url)); } catch (e) {} return origFetch.apply(this, arguments); };
+    shell.XMLHttpRequest.prototype.open = myXHR; shell.fetch = myFetch;
+  } catch (e) {}
+  function libCandidates() {
+    var c = [S.libId], seen = {};
+    try { c.push(shell.localStorage.getItem(LIB_KEY)); } catch (e) {}
+    [shell, window].forEach(function (w) { try { w.performance.getEntriesByType('resource').forEach(function (r) { c.push(libIdFrom(r.name)); }); } catch (e) {} });
+    try { var ctx = window.Static && window.Static.SQUARESPACE_CONTEXT; if (ctx) { c.push(ctx.website && ctx.website.id); c.push(ctx.websiteId); } } catch (e) {}
+    return c.filter(function (x) { return x && /^[0-9a-f]{20,}$/i.test(x) && !seen[x] && (seen[x] = 1); });
+  }
+  function libGet(id, url) {
+    return origFetch.call(shell, url, { credentials: 'include', headers: { 'X-Library-Id': id } }).then(function (r) { if (!r.ok) throw new Error('HTTP ' + r.status); return r.json(); });
+  }
+  function norm(r) {
+    var sm = r.stringMetaData || {}, nm = r.numericMetadata || {};
+    var name = r.name || r.fileName || r.filename || r.originalFilename || r.title || sm.originalFilename || sm.fileName || sm.name || '';
+    var d = r.createdAt ? new Date(r.createdAt) : null, date = d && !isNaN(d) ? d.toLocaleDateString(undefined, { year: 'numeric', month: 'short', day: 'numeric' }) : '';
+    var dim = nm.originalWidth && nm.originalHeight ? nm.originalWidth + '×' + nm.originalHeight : '';
+    var thumb = r.assetUrl + (r.assetUrl.indexOf('?') > -1 ? '&' : '?') + 'format=300w';
+    return { url: r.assetUrl, thumb: thumb, name: name, label: name || [date, dim].filter(Boolean).join(' · ') || r.id, q: [name, date, dim, r.id, sm.fileExtension, r.assetSource].join(' ').toLowerCase() };
+  }
   function openPicker(done) {
     S.picking = true;
     function shut() { S.picking = false; setTimeout(function () { ov.remove(); }, 0); }
-    var all = assetCandidates(), grid = h('div', { class: 'sqf-grid' });
-    var q = h('input', { type: 'text', placeholder: 'Search by filename', 'aria-label': 'Search images' });
+    var items = [], next = '', total = 0, libId = '', busy = false, fallback = false;
+    var grid = h('div', { class: 'sqf-grid' }), more = h('button', { type: 'button', class: 'sqf-btn', text: 'Load more', onclick: function () { load(); } });
+    var info = h('div', { class: 'sqf-note', style: 'padding:0 16px 8px' });
+    var q = h('input', { type: 'text', placeholder: 'Search (date, size, name)', 'aria-label': 'Search images' });
     var manual = h('input', { type: 'text', placeholder: 'Or paste an image URL, press Enter' });
     var ov = h('div', { class: 'sqf-pick' }, [
-      h('div', { class: 'sqf-h' }, [h('span', { class: 'sqf-t', text: 'Choose image' }), h('button', { type: 'button', class: 'sqf-ib', text: '×', 'aria-label': 'Close', onclick: function () { shut(); } })]),
+      h('div', { class: 'sqf-h' }, [h('span', { class: 'sqf-t', text: 'Asset Library' }), h('button', { type: 'button', class: 'sqf-ib', text: '×', 'aria-label': 'Close', onclick: shut })]),
       h('div', { class: 'sqf-tools' }, [q, h('div', { style: 'height:8px' }), manual]),
-      grid
+      info, grid
     ]);
     function draw() {
       grid.textContent = '';
-      var t = q.value.toLowerCase(), list = all.filter(function (a) { return a.name.toLowerCase().indexOf(t) > -1; });
-      if (!list.length) grid.appendChild(h('div', { class: 'sqf-empty', text: 'No images found.' }));
-      list.forEach(function (a) { grid.appendChild(h('button', { type: 'button', class: 'sqf-th', onclick: function () { done(a.url); shut(); } }, [h('img', { src: a.url, alt: '' }), h('span', { text: a.name })])); });
+      var t = q.value.toLowerCase().trim(), list = items.filter(function (a) { return !t || a.q.indexOf(t) > -1; });
+      if (!list.length) grid.appendChild(h('div', { class: 'sqf-empty', text: busy ? 'Loading…' : 'No images found' + (next ? ' yet. Try Load more.' : '.') }));
+      list.forEach(function (a) {
+        grid.appendChild(h('button', { type: 'button', class: 'sqf-th', title: a.label, onclick: function () { done(a.url); shut(); } }, [h('img', { src: a.thumb, alt: '', loading: 'lazy' }), h('span', { text: a.label })]));
+      });
+      if (next && !fallback) { more.disabled = busy; more.textContent = busy ? 'Loading…' : 'Load more (' + items.length + ' of ' + total + ')'; more.style.gridColumn = '1 / -1'; grid.appendChild(more); }
+      info.textContent = fallback ? 'Could not reach the Asset Library, showing images found on this page. Open the library once in the editor and try again.' : (total ? total + ' images in your library' : '');
+    }
+    function take(j) {
+      var a = (j && j.assets) || {}; next = a.next || ''; total = a.total || total || 0;
+      (a.assetRecords || []).forEach(function (r) { if (r && r.assetUrl && (!r.assetType || r.assetType === 'IMAGE')) items.push(norm(r)); });
+    }
+    function load() {
+      if (busy) return; busy = true; draw();
+      var go;
+      if (libId) go = libGet(libId, next || MEDIA + 'user/libraries/' + libId + '/folders/root/assets?order=DESC&orderBy=CREATED_AT&assetTypes=IMAGE&limit=72&offset=0').then(take);
+      else {                                                    // find a library id that the API accepts
+        var ids = libCandidates(), i = 0;
+        var tryNext = function () {
+          if (i >= ids.length) return Promise.reject(new Error('no library id'));
+          var id = ids[i++];
+          return libGet(id, MEDIA + 'user/libraries/' + id + '/folders/root/assets?order=DESC&orderBy=CREATED_AT&assetTypes=IMAGE&limit=72&offset=0').then(function (j) { libId = id; rememberLib(id); take(j); }, tryNext);
+        };
+        go = tryNext();
+      }
+      go.then(function () { busy = false; draw(); }, function () {
+        busy = false;
+        if (!items.length) { fallback = true; items = assetCandidates().map(function (a) { return { url: a.url, thumb: a.url, name: a.name, label: a.name, q: a.name.toLowerCase() }; }); }
+        draw();
+      });
     }
     q.addEventListener('input', draw);
     manual.addEventListener('keydown', function (e) { if (e.key === 'Enter' && manual.value.trim()) { done(manual.value.trim()); shut(); } });
-    S.panel.appendChild(ov); draw(); q.focus();
+    S.panel.appendChild(ov); draw(); load(); q.focus();
   }
 
   function repeaterView(node, src, root) {
@@ -684,6 +741,7 @@
   check();
 
   function dispose() {
+    try { if (shell.XMLHttpRequest.prototype.open === myXHR) shell.XMLHttpRequest.prototype.open = origXHR; if (shell.fetch === myFetch) shell.fetch = origFetch; } catch (e) {}
     RT.forEach(function (t) { SD.removeEventListener(t, rec, true); });
     mo.disconnect(); clearInterval(iv); closePanel(); styleEl.remove();
     document.removeEventListener('dblclick', onDbl, true); shell.removeEventListener('resize', place);

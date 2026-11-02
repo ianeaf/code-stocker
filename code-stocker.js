@@ -294,12 +294,12 @@
     '.sqf-in{padding:0 12px 12px}',
     '.sqf-btn{display:block;width:100%;margin-top:10px;border:1px solid #1a1a1a;background:#fff;border-radius:var(--r,4px);padding:7px;font:inherit;font-size:10.5px;letter-spacing:.09em;text-transform:uppercase;font-weight:600;cursor:pointer}',
     '.sqf-btn.s{width:auto;display:inline-block;margin:0 0 0 8px;padding:5px 9px}',
-    '.sqf-img{display:flex;gap:8px;align-items:flex-start}.sqf-img img{width:56px;height:56px;object-fit:cover;border:1px solid #e3e3e3;border-radius:var(--r,4px);background:#f3f3f3}',
+    '.sqf-img{display:flex;gap:8px;align-items:flex-start}.sqf-img img{width:56px;height:56px;aspect-ratio:1/1;object-fit:cover;border:1px solid #e3e3e3;border-radius:var(--r,4px);background:#f3f3f3}',
     '.sqf-img>div{flex:1;min-width:0}',
     '.sqf-pick{position:absolute;inset:0;background:#fff;z-index:2;display:flex;flex-direction:column;border-radius:var(--r,4px)}',
     '.sqf-grid{flex:1;overflow:auto;padding:0 16px 16px;display:grid;grid-template-columns:1fr 1fr;gap:8px;align-content:start}',
     '.sqf-th{border:1px solid #e3e3e3;border-radius:var(--r,4px);background:#fff;padding:0;cursor:pointer;text-align:left;font:inherit;overflow:hidden}',
-    '.sqf-th img{display:block;width:100%;height:80px;object-fit:cover;background:#f3f3f3}.sqf-th span{display:block;padding:4px 6px;font-size:10.5px;overflow:hidden;white-space:nowrap;text-overflow:ellipsis}',
+    '.sqf-th img{display:block;width:100%;aspect-ratio:1/1;height:auto;object-fit:cover;background:#f3f3f3}.sqf-th span{display:block;padding:4px 6px;font-size:10.5px;overflow:hidden;white-space:nowrap;text-overflow:ellipsis}',
     '.sqf-empty{color:#777;padding:18px 0;font-size:12px}',
     '.sqf-foot{border-top:1px solid #ececec;padding:8px 16px;font-size:11px;color:#777}'
   ].join('\n');
@@ -331,7 +331,17 @@
       h('div', { class: 'sqf-foot', text: 'Edits update the editor. Nothing is live until you click Save.' })
     ]);
     S.panel = panel; S.body = body; S.status = status; S.search = search;
-    SD.body.appendChild(panel);
+    var host = canNest(S.dialog) ? S.dialog : SD.body;
+    host.appendChild(panel);
+    ['mousedown', 'mouseup', 'click', 'dblclick', 'pointerdown', 'pointerup', 'touchstart', 'touchend', 'keydown', 'keyup', 'keypress', 'focusin', 'focusout', 'contextmenu'].forEach(function (t) {
+      panel.addEventListener(t, function (e) { e.stopPropagation(); });      // keep Squarespace's outside-click / shortcut handlers blind to the panel
+    });
+  }
+  function canNest(dlg) {                                          // position:fixed only escapes the dialog if it has no transform-like containing block
+    try {
+      var c = shell.getComputedStyle(dlg);
+      return (c.transform === 'none' || !c.transform) && (c.filter === 'none' || !c.filter) && (c.perspective === 'none' || !c.perspective) && (!c.contain || c.contain === 'none') && !/transform|filter|perspective/.test(c.willChange || '') && (!c.backdropFilter || c.backdropFilter === 'none');
+    } catch (e) { return false; }
   }
   function setStatus(msg, bad) { if (!S.status) return; S.status.textContent = msg; S.status.className = 'sqf-s' + (bad ? ' bad' : ''); }
 
@@ -466,11 +476,13 @@
     return out;
   }
   function openPicker(done) {
+    S.picking = true;
+    function shut() { S.picking = false; setTimeout(function () { ov.remove(); }, 0); }
     var all = assetCandidates(), grid = h('div', { class: 'sqf-grid' });
     var q = h('input', { type: 'text', placeholder: 'Search by filename', 'aria-label': 'Search images' });
     var manual = h('input', { type: 'text', placeholder: 'Or paste an image URL, press Enter' });
     var ov = h('div', { class: 'sqf-pick' }, [
-      h('div', { class: 'sqf-h' }, [h('span', { class: 'sqf-t', text: 'Choose image' }), h('button', { type: 'button', class: 'sqf-ib', text: '×', 'aria-label': 'Close', onclick: function () { ov.remove(); } })]),
+      h('div', { class: 'sqf-h' }, [h('span', { class: 'sqf-t', text: 'Choose image' }), h('button', { type: 'button', class: 'sqf-ib', text: '×', 'aria-label': 'Close', onclick: function () { shut(); } })]),
       h('div', { class: 'sqf-tools' }, [q, h('div', { style: 'height:8px' }), manual]),
       grid
     ]);
@@ -478,10 +490,10 @@
       grid.textContent = '';
       var t = q.value.toLowerCase(), list = all.filter(function (a) { return a.name.toLowerCase().indexOf(t) > -1; });
       if (!list.length) grid.appendChild(h('div', { class: 'sqf-empty', text: 'No images found.' }));
-      list.forEach(function (a) { grid.appendChild(h('button', { type: 'button', class: 'sqf-th', onclick: function () { done(a.url); ov.remove(); } }, [h('img', { src: a.url, alt: '' }), h('span', { text: a.name })])); });
+      list.forEach(function (a) { grid.appendChild(h('button', { type: 'button', class: 'sqf-th', onclick: function () { done(a.url); shut(); } }, [h('img', { src: a.url, alt: '' }), h('span', { text: a.name })])); });
     }
     q.addEventListener('input', draw);
-    manual.addEventListener('keydown', function (e) { if (e.key === 'Enter' && manual.value.trim()) { done(manual.value.trim()); ov.remove(); } });
+    manual.addEventListener('keydown', function (e) { if (e.key === 'Enter' && manual.value.trim()) { done(manual.value.trim()); shut(); } });
     S.panel.appendChild(ov); draw(); q.focus();
   }
 
@@ -633,6 +645,7 @@
     } catch (e) {}
   }
   function closePanel() {
+    S.picking = false;
     clearTimeout(S.timer); clearTimeout(S.resyncT);
     if (S.mo) S.mo.disconnect();
     if (S.panel) S.panel.remove();
@@ -647,9 +660,15 @@
     var top = Math.max(8, r.top), height = Math.max(240, Math.min(r.height || H - 16, H - top - 8));
     var st = S.panel.style; st.left = left + 'px'; st.top = top + 'px'; st.height = height + 'px';
   }
+  var ring = [];
+  function rec(e) {
+    ring.push((e.type) + ' ' + ((e.target && e.target.tagName) || '') + '.' + (((e.target && e.target.className) || '') + '').toString().slice(0, 30) + ' inPanel=' + !!(S.panel && S.panel.contains(e.target)) + ' @' + Math.round(performance.now()));
+    if (ring.length > 12) ring.shift();
+  }
+  var RT = ['pointerdown', 'mousedown', 'click', 'focusin', 'focusout', 'keydown']; RT.forEach(function (t) { SD.addEventListener(t, rec, true); });
   function check() {
     var d = findDialog();
-    if (S.dialog && (!S.dialog.isConnected || d !== S.dialog)) closePanel();
+    if (S.dialog && (!S.dialog.isConnected || d !== S.dialog)) { if (S.picking && shell.console) shell.console.warn('[code-stocker] dialog closed while picker open. Last events:\n' + ring.join('\n')); closePanel(); }
     if (d && !S.dialog) openFor(d);
     else place();
   }
@@ -665,6 +684,7 @@
   check();
 
   function dispose() {
+    RT.forEach(function (t) { SD.removeEventListener(t, rec, true); });
     mo.disconnect(); clearInterval(iv); closePanel(); styleEl.remove();
     document.removeEventListener('dblclick', onDbl, true); shell.removeEventListener('resize', place);
     delete shell.__codeStocker;

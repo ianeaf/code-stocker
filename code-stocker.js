@@ -140,17 +140,18 @@
       return res;
     }
     function count(nodes) { var n = 0; nodes.forEach(function (x) { n += x.type === 'repeater' ? x.items.reduce(function (a, it) { return a + count(it.nodes); }, 0) : 1; }); return n; }
-    function firstSnippet(nodes) {
-      for (var i = 0; i < nodes.length; i++) {
-        var n = nodes[i];
-        if (n.type === 'text') { var t = src.slice(n.el.innerStart, n.el.innerEnd).replace(/<[^>]*>/g, '').replace(/\s+/g, ' ').trim(); if (t) return t.slice(0, 44); }
-        if (n.type === 'repeater') { var r = firstSnippet(n.items[0].nodes); if (r) return r; }
-      }
+    function snip(n) { return src.slice(n.el.innerStart, n.el.innerEnd).replace(/<[^>]*>/g, '').replace(/&nbsp;/g, ' ').replace(/\s+/g, ' ').trim().slice(0, 44); }
+    function firstSnippet(nodes, headingOnly) {
+      var i, n, r;
+      for (i = 0; i < nodes.length; i++) { n = nodes[i]; if (n.type === 'text' && /^h[1-4]$/.test(n.el.tag) && (r = snip(n))) return r; }
+      for (i = 0; i < nodes.length; i++) { n = nodes[i]; if (n.type === 'repeater' && n.items.length && (r = firstSnippet(n.items[0].nodes, headingOnly))) return r; }
+      if (headingOnly) return '';
+      for (i = 0; i < nodes.length; i++) { n = nodes[i]; if (n.type === 'text' && (r = snip(n))) return r; }
       return '';
     }
-    function pretty(el) {
-      var c = classKey(src, el).split(' ')[0]; if (!c) return '';
-      c = c.split('__').pop().replace(/[-_]+/g, ' ').trim(); return c.charAt(0).toUpperCase() + c.slice(1);
+    function kindName(nodes) {
+      var t = {}; nodes.forEach(function (n) { t[n.type] = 1; });
+      return t.image && !t.text ? 'Image' : (t.link && !t.text ? 'Link' : 'Section');
     }
     function findBlocks() {
       var cont = root, g = [];
@@ -160,11 +161,17 @@
       }
       var blocks = [], loose = null;
       g.forEach(function (x) {
-        if (!x.rep && leaf(x.el)) { if (!loose) { loose = { key: 'loose' + blocks.length, title: 'Content', nodes: [] }; blocks.push(loose); } x.nodes.forEach(function (n) { loose.nodes.push(n); }); return; }
+        if (!x.rep && leaf(x.el)) { if (!loose) { loose = { key: 'loose' + blocks.length, title: '', nodes: [] }; blocks.push(loose); } x.nodes.forEach(function (n) { loose.nodes.push(n); }); return; }
         loose = null;
-        blocks.push({ el: x.rep ? null : x.el, key: pathOf(x.el).join('/'), title: x.rep ? x.nodes[0].label : (pretty(x.el) || (x.el.attrs.id ? attr(src, x.el, 'id') : '')), nodes: x.nodes });
+        blocks.push({ el: x.rep ? null : x.el, key: pathOf(x.el).join('/'), title: '', nodes: x.nodes });
       });
-      blocks.forEach(function (b) { b.sub = firstSnippet(b.nodes); b.count = count(b.nodes); if (!b.title) b.title = b.sub || 'Section'; if (b.title === b.sub) b.sub = ''; });
+      blocks.forEach(function (b) {
+        b.count = count(b.nodes); b.sub = '';
+        if (b.nodes.length === 1 && b.nodes[0].type === 'repeater') {          // a repeated group: name it by the first few entries
+          var names = b.nodes[0].items.map(function (it) { return firstSnippet(it.nodes); }).filter(Boolean).slice(0, 3);
+          b.title = names.length ? names.join(' · ') : b.nodes[0].label;
+        } else b.title = firstSnippet(b.nodes) || kindName(b.nodes);
+      });
       return blocks;
     }
 
@@ -194,11 +201,7 @@
       collect(c, out);
     }
   }
-  function groupLabel(el) {
-    var c = classKey(src0, el).split(' ')[0];
-    var base = el.tag === 'li' ? 'List' : (c ? c.replace(/^[a-z]{1,4}[-_]/i, '').replace(/[-_]+/g, ' ') : el.tag);
-    return base.charAt(0).toUpperCase() + base.slice(1);
-  }
+  function groupLabel(el) { return el.tag === 'li' ? 'List' : el.tag === 'a' ? 'Links' : 'Items'; }
   var src0 = '';
 
   /* ───────────────────────── 4. Layout safety for add/remove/reorder ───────────────────────── */
@@ -261,18 +264,29 @@
     content.dispatchEvent(new shell.KeyboardEvent('keydown', o));
   }
   function selectAll(content) { content.focus(); sendKey(content, 'a', 'KeyA', 65); }
-  function readCode(content) {
-    // Fast path: whole document is in the DOM (no .cm-gap spacers from virtualisation).
-    if (!content.querySelector('.cm-gap') && content.querySelectorAll('.cm-line').length) return domCode(content);
-    var v = cmView(content); if (v) return v.state.doc.toString();
-    // Virtualised: let CodeMirror serialise the full selection through its own copy handler.
+  function isVirtual(content) {                                 // CodeMirror only keeps lines near the viewport in the DOM
+    var sc = content.closest && content.closest('.cm-scroller');
+    return !!content.querySelector('.cm-gap') || !!(sc && sc.scrollHeight > sc.clientHeight + 4);
+  }
+  /* Returns the FULL document text, or null if it cannot be read with certainty (never a partial read). */
+  function readCode(content, allowCopy) {
+    var v = cmView(content); if (v) return v.state.doc.toString();             // exact
+    if (!isVirtual(content) && content.querySelectorAll('.cm-line').length) return domCode(content);
+    if (!allowCopy) return null;
     var got = null, h = function (e) { if (e.clipboardData) got = e.clipboardData.getData('text/plain'); };
-    SD.addEventListener('copy', h);
+    SD.addEventListener('copy', h);                                            // CodeMirror's own copy handler serialises the whole doc
     try { selectAll(content); SD.execCommand('copy'); } catch (e) {}
     SD.removeEventListener('copy', h);
-    return got != null ? got : domCode(content);
+    return got;
   }
   var strategies = [
+    function view(content, text) {                              // smallest possible change through CodeMirror itself
+      var v = cmView(content); if (!v) return;
+      var cur = v.state.doc.toString(), a = 0, max = Math.min(cur.length, text.length);
+      while (a < max && cur.charCodeAt(a) === text.charCodeAt(a)) a++;
+      var e = 0; while (e < max - a && cur.charCodeAt(cur.length - 1 - e) === text.charCodeAt(text.length - 1 - e)) e++;
+      v.dispatch({ changes: { from: a, to: cur.length - e, insert: text.slice(a, text.length - e) }, userEvent: 'input.paste' });
+    },
     function paste(content, text) {
       selectAll(content);
       var dt = new shell.DataTransfer(); dt.setData('text/plain', text);
@@ -292,7 +306,7 @@
   function writeCode(content, text) {
     for (var i = 0; i < strategies.length; i++) {
       try { strategies[i](content, text); } catch (e) {}
-      if (readCode(content) === text) return strategies[i].name;
+      if (readCode(content, true) === text) return strategies[i].name;
     }
     return null;
   }
@@ -356,7 +370,7 @@
     '.sqf-blk{border:1px solid #e3e3e3;border-radius:var(--r,4px);margin-top:10px;background:#fff}',
     '.sqf-bh{display:flex;width:100%;align-items:center;gap:8px;background:none;border:0;padding:10px 12px;cursor:pointer;font:inherit;text-align:left;color:inherit}',
     '.sqf-bh .a{font-size:10px;transition:transform .12s;color:#555}.sqf-blk.on>.sqf-bh .a{transform:rotate(90deg)}',
-    '.sqf-bh .t{flex:1;min-width:0;overflow:hidden;white-space:nowrap;text-overflow:ellipsis;font-size:11px;letter-spacing:.09em;text-transform:uppercase;font-weight:600}',
+    '.sqf-bh .t{flex:1;min-width:0;overflow:hidden;white-space:nowrap;text-overflow:ellipsis;font-size:12.5px;font-weight:600}',
     '.sqf-bh .s{display:block;text-transform:none;letter-spacing:0;font-weight:400;color:#777;font-size:11px;overflow:hidden;text-overflow:ellipsis}',
     '.sqf-bh .c{font-size:11px;color:#777;background:#f0f0f0;border-radius:999px;padding:1px 7px}',
     '.sqf-blk.on>.sqf-bh{border-bottom:1px solid #ececec;background:#fffbe0}',
@@ -937,6 +951,7 @@
 
   /* ───────────────────────── 7. Write queue + external-edit resync ───────────────────────── */
   function queueWrite() {
+    if (S.locked) return;
     clearTimeout(S.timer); S.pending = true; setStatus('Editing…');
     S.timer = setTimeout(function () {
       S.pending = false;
@@ -952,8 +967,8 @@
       clearTimeout(S.resyncT);
       S.resyncT = setTimeout(function () {
         if (!S.content || S.pending) return;     // never clobber an unsent edit
-        var cur = readCode(S.content);
-        if (cur === S.src) return;
+        var cur = readCode(S.content, false);
+        if (cur === null || cur === S.src) return;
         S.src = cur; render();
       }, 400);
     });
@@ -968,10 +983,12 @@
   }
   function looksLikeHtml(t) { t = t.trim(); return t === '' || t.charAt(0) === '<'; }
   function openFor(dlg) {
-    var content = dlg.querySelector('.cm-editor .cm-content'), text = readCode(content);
+    var content = dlg.querySelector('.cm-editor .cm-content'), text = readCode(content, true);
+    S.locked = text === null; if (S.locked) text = '';
     if (!looksLikeHtml(text)) return;                              // e.g. a CSS editor — leave alone
     S.dialog = dlg; S.content = content; S.src = text; S.open = {}; S.q = ''; S.filter = 'all';
     buildPanel(); skin(dlg); render(); watchContent(); place();
+    if (S.locked) { S.body.textContent = ''; S.body.appendChild(h('div', { class: 'sqf-empty', text: 'This code is too long for Code Stocker to read safely in this editor, so it is paused and your code is untouched.' })); setStatus('Paused', true); }
   }
   function skin(dlg) {                                         // borrow the admin shell's own font and corner radii
     try {

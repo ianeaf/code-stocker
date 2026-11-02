@@ -123,7 +123,50 @@
   function collectAll(src, root) {
     var out = [];
     collect(root, out);
+    out.blocks = findBlocks();
     return out;
+
+    /* "Blocks" = the top-level parts of the code, for the accordion. Descend through single wrapper elements. */
+    function leaf(el) { return !!TEXT[el.tag] || el.tag === 'img' || el.tag === 'a'; }
+    function groups(el) {
+      var kids = el.children.filter(function (c) { return !SKIP[c.tag]; }), res = [];
+      for (var i = 0; i < kids.length;) {
+        var c = kids[i], sg = sig(c, 0) + '|' + classKey(src, c), j = i + 1;
+        while (j < kids.length && sig(kids[j], 0) + '|' + classKey(src, kids[j]) === sg) j++;
+        var nodes = [];
+        if (j - i >= 2 && repeatable(src, c)) { var run = kids.slice(i, j), items = run.map(function (k) { var n = []; one(k, n); return { el: k, nodes: n }; }); if (items.some(function (it) { return it.nodes.length; })) res.push({ el: c, rep: true, nodes: [{ type: 'repeater', parent: el, els: run, items: items, label: groupLabel(c) }] }); i = j; continue; }
+        one(c, nodes); if (nodes.length) res.push({ el: c, nodes: nodes }); i++;
+      }
+      return res;
+    }
+    function count(nodes) { var n = 0; nodes.forEach(function (x) { n += x.type === 'repeater' ? x.items.reduce(function (a, it) { return a + count(it.nodes); }, 0) : 1; }); return n; }
+    function firstSnippet(nodes) {
+      for (var i = 0; i < nodes.length; i++) {
+        var n = nodes[i];
+        if (n.type === 'text') { var t = src.slice(n.el.innerStart, n.el.innerEnd).replace(/<[^>]*>/g, '').replace(/\s+/g, ' ').trim(); if (t) return t.slice(0, 44); }
+        if (n.type === 'repeater') { var r = firstSnippet(n.items[0].nodes); if (r) return r; }
+      }
+      return '';
+    }
+    function pretty(el) {
+      var c = classKey(src, el).split(' ')[0]; if (!c) return '';
+      c = c.split('__').pop().replace(/[-_]+/g, ' ').trim(); return c.charAt(0).toUpperCase() + c.slice(1);
+    }
+    function findBlocks() {
+      var cont = root, g = [];
+      for (var d = 0; d < 6; d++) {
+        g = groups(cont);
+        if (g.length === 1 && !g[0].rep && !leaf(g[0].el) && g[0].el.children.length) cont = g[0].el; else break;
+      }
+      var blocks = [], loose = null;
+      g.forEach(function (x) {
+        if (!x.rep && leaf(x.el)) { if (!loose) { loose = { key: 'loose' + blocks.length, title: 'Content', nodes: [] }; blocks.push(loose); } x.nodes.forEach(function (n) { loose.nodes.push(n); }); return; }
+        loose = null;
+        blocks.push({ key: pathOf(x.el).join('/'), title: x.rep ? x.nodes[0].label : (pretty(x.el) || (x.el.attrs.id ? attr(src, x.el, 'id') : '')), nodes: x.nodes });
+      });
+      blocks.forEach(function (b) { b.sub = firstSnippet(b.nodes); b.count = count(b.nodes); if (!b.title) b.title = b.sub || 'Section'; if (b.title === b.sub) b.sub = ''; });
+      return blocks;
+    }
 
     function collect(el, out) {
       var kids = el.children.filter(function (c) { return !SKIP[c.tag]; });
@@ -303,6 +346,15 @@
     '.sqf-th span{position:absolute;left:0;right:0;bottom:0;padding:10px 4px 3px;font-size:9px;line-height:1.1;color:#fff;background:linear-gradient(transparent,rgba(0,0,0,.65));overflow:hidden;white-space:nowrap;text-overflow:ellipsis;opacity:0;transition:opacity .12s;text-align:left}',
     '.sqf-th:hover span,.sqf-th:focus-visible span{opacity:1}',
     '.sqf-th:hover{box-shadow:inset 0 0 0 2px #111}',
+    '.sqf [hidden]{display:none!important}',
+    '.sqf-blk{border:1px solid #e3e3e3;border-radius:var(--r,4px);margin-top:10px;background:#fff}',
+    '.sqf-bh{display:flex;width:100%;align-items:center;gap:8px;background:none;border:0;padding:10px 12px;cursor:pointer;font:inherit;text-align:left;color:inherit}',
+    '.sqf-bh .a{font-size:10px;transition:transform .12s;color:#555}.sqf-blk.on>.sqf-bh .a{transform:rotate(90deg)}',
+    '.sqf-bh .t{flex:1;min-width:0;overflow:hidden;white-space:nowrap;text-overflow:ellipsis;font-size:11px;letter-spacing:.09em;text-transform:uppercase;font-weight:600}',
+    '.sqf-bh .s{display:block;text-transform:none;letter-spacing:0;font-weight:400;color:#777;font-size:11px;overflow:hidden;text-overflow:ellipsis}',
+    '.sqf-bh .c{font-size:11px;color:#777;background:#f0f0f0;border-radius:999px;padding:1px 7px}',
+    '.sqf-blk.on>.sqf-bh{border-bottom:1px solid #ececec;background:#fffbe0}',
+    '.sqf-bb{display:none;padding:0 12px 12px}.sqf-blk.on>.sqf-bb,.sqf.flt .sqf-bb{display:block}',
     '.sqf-rt{display:flex;align-items:center}',
     '.sqf-plus{width:24px;height:24px;margin-left:8px;border:1px solid #111;background:#fff;border-radius:var(--r,4px);cursor:pointer;font-size:17px;line-height:1;padding:0;color:#111}',
     '.sqf-plus:hover{background:#111;color:#FFD60A}',
@@ -764,7 +816,22 @@
     S.controls = []; S.body.textContent = ''; S.sig = signature(nodes);
     if (S.notice) S.body.appendChild(S.notice);
     if (!nodes.length) S.body.appendChild(h('div', { class: 'sqf-empty', text: S.src.trim() ? 'No editable text, links or images found in this code.' : 'This Code Block is empty. Add HTML and its fields appear here.' }));
-    renderNodes(nodes, S.src, root).forEach(function (n) { S.body.appendChild(n); });
+    var blocks = nodes.blocks || [], total = blocks.reduce(function (a, b) { return a + b.count; }, 0);
+    if (blocks.length >= 2 && (total > 8 || blocks.length > 3)) {          // long code: one section open at a time
+      if (!blocks.some(function (b) { return b.key === S.blk; }) && S.blk !== '') S.blk = blocks[0].key;
+      blocks.forEach(function (b) {
+        var bh = h('button', { type: 'button', class: 'sqf-bh', 'aria-expanded': b.key === S.blk }, [
+          h('span', { class: 'a', text: '▸' }),
+          h('span', { class: 't' }, [b.title, b.sub ? h('span', { class: 's', text: b.sub }) : null]),
+          h('span', { class: 'c', text: b.count })]);
+        var box = h('div', { class: 'sqf-blk' + (b.key === S.blk ? ' on' : ''), 'data-k': b.key }, [bh, h('div', { class: 'sqf-bb' }, renderNodes(b.nodes, S.src, root))]);
+        bh.addEventListener('click', function () {
+          S.blk = S.blk === b.key ? '' : b.key;
+          Array.prototype.forEach.call(S.body.querySelectorAll('.sqf-blk'), function (x) { var on = x.getAttribute('data-k') === S.blk; x.classList.toggle('on', on); x.firstChild.setAttribute('aria-expanded', on); });
+        });
+        S.body.appendChild(box);
+      });
+    } else renderNodes(nodes, S.src, root).forEach(function (n) { S.body.appendChild(n); });
     applyFilter(); S.body.scrollTop = scroll;
   }
   function refresh() {                                            // in-place value sync; re-render only if structure moved
@@ -785,6 +852,8 @@
       f.hidden = !(okKind && okQ);
     });
     Array.prototype.forEach.call(S.body.querySelectorAll('details.sqf-it'), function (d) { d.hidden = !d.querySelector('.sqf-f:not([hidden])'); });
+    var flt = !!(S.q || S.filter !== 'all'); S.panel.classList.toggle('flt', flt);
+    Array.prototype.forEach.call(S.body.querySelectorAll('.sqf-blk'), function (b) { b.hidden = flt && !b.querySelector('.sqf-f:not([hidden])'); });
     Array.prototype.forEach.call(S.body.querySelectorAll('.sqf-rep'), function (g) { g.hidden = (S.q || S.filter !== 'all') && !g.querySelector('.sqf-f:not([hidden])'); });
   }
 
@@ -837,7 +906,7 @@
   }
   function closePanel() {
     S.picking = false; S.verified = false;
-    clearTimeout(S.timer); clearTimeout(S.resyncT);
+    clearTimeout(S.timer); clearTimeout(S.resyncT); S.blk = undefined;
     if (S.mo) S.mo.disconnect();
     if (S.panel) S.panel.remove();
     S.panel = S.body = S.dialog = S.content = null; S.controls = [];

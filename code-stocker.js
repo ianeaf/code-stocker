@@ -613,20 +613,34 @@
     for (k in o) { r = typeof o[k] === 'object' && deepUrl(o[k]); if (r) return r; }
     return '';
   }
-  function uploadDefault(blob, name) {                          // POST media-api /uploads/image, multipart field "image"
+  function uploadDefault(blob, name) {                          // POST media-api /uploads/image (multipart "image"); reply may be an async job
     var ids = libCandidates(); if (!ids.length) return Promise.reject(new Error('Library not found. Open the Asset Library once, then retry'));
-    var id = ids[0], fd = new shell.FormData(); fd.append('image', blob, name);
-    var hd = { 'Accept': 'application/json', 'X-Library-Id': id }; if (S.sqspSource) hd['X-sqsp-source'] = S.sqspSource;
-    return origFetch.call(shell, MEDIA + 'uploads/image', { method: 'POST', credentials: 'include', headers: hd, body: fd }).then(function (r) {
+    var id = ids[0], listUrl = MEDIA + 'user/libraries/' + id + '/folders/root/assets?order=DESC&orderBy=CREATED_AT&assetTypes=IMAGE&limit=6&offset=0';
+    var before = {};
+    function ping(ms) { return new Promise(function (r) { setTimeout(r, ms); }); }
+    function newest() { return libGet(id, listUrl).then(function (j) { return ((j && j.assets && j.assets.assetRecords) || []).filter(function (r) { return r && r.assetUrl; }); }); }
+    function waitForAsset(waitMs, tries) {                      // job status URL is unknown, so watch for a new record at the top of the library
+      return ping(waitMs).then(newest).then(function (recs) {
+        var fresh = recs.filter(function (r) { return !before[r.id]; });
+        if (fresh.length) return fresh[0].assetUrl;
+        if (tries <= 1) throw new Error('Upload was accepted but the image has not appeared in the library yet. Check the Asset Library in a minute');
+        return waitForAsset(Math.max(1000, waitMs), tries - 1);
+      });
+    }
+    return newest().catch(function () { return []; }).then(function (recs) {
+      recs.forEach(function (r) { before[r.id] = 1; });
+      var fd = new shell.FormData(); fd.append('image', blob, name);
+      var hd = { 'Accept': 'application/json', 'X-Library-Id': id }; if (S.sqspSource) hd['X-sqsp-source'] = S.sqspSource;
+      return origFetch.call(shell, MEDIA + 'uploads/image', { method: 'POST', credentials: 'include', headers: hd, body: fd });
+    }).then(function (r) {
       return r.text().then(function (t) {
         if (!r.ok) throw new Error('Upload failed (HTTP ' + r.status + ') ' + t.replace(/\s+/g, ' ').slice(0, 140));
         var j = null; try { j = JSON.parse(t); } catch (e) {}
         var u = deepUrl(j);
-        if (!u && j && (j.id || (j.asset && j.asset.id))) {      // fall back to the CDN pattern seen in library records
-          var aid = j.id || j.asset.id; u = 'https://images.squarespace-cdn.com/content/' + id + '/' + aid + '/' + encodeURIComponent(name);
-        }
-        if (!u) throw new Error('Upload succeeded but the reply had no image URL: ' + t.replace(/\s+/g, ' ').slice(0, 140));
-        rememberLib(id); return u;
+        rememberLib(id);
+        if (u) return u;
+        if (j && (j.jobId || j.checkStatusAfterMs)) return waitForAsset(Math.max(800, +j.checkStatusAfterMs || 1000), 30);
+        throw new Error('Upload succeeded but the reply had no image URL: ' + t.replace(/\s+/g, ' ').slice(0, 140));
       });
     });
   }
@@ -651,7 +665,7 @@
     squeeze(file).then(function (res) {
       var fname = meta.name + '.' + res.ext, blob = res.blob;
       var sizeTxt = res.changed ? kb(blob.size) + ' (was ' + kb(file.size) + ')' : kb(blob.size);
-      msg.textContent = 'Uploading ' + fname + ' · ' + sizeTxt + '…';
+      msg.textContent = 'Uploading ' + fname + ' · ' + sizeTxt + '… (Squarespace may take a few seconds to process it)';
       var local = URL.createObjectURL(blob);
       return uploadAsset(blob, fname).then(function (url) {
         insertImage(url, meta.alt); render();

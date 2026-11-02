@@ -489,11 +489,12 @@
   var LIB_KEY = 'codeStocker.libId', MEDIA = 'https://media-api.squarespace.com/';
   function libIdFrom(u) { var m = /\/libraries\/([0-9a-f]{20,})/i.exec(u || ''); return m && m[1]; }
   function rememberLib(id) { if (!id) return; S.libId = id; try { shell.localStorage.setItem(LIB_KEY, id); } catch (e) {} }
-  var origXHR = shell.XMLHttpRequest.prototype.open, origFetch = shell.fetch, myXHR, myFetch;
+  var origXHR = shell.XMLHttpRequest.prototype.open, origFetch = shell.fetch, origSRH = shell.XMLHttpRequest.prototype.setRequestHeader, myXHR, myFetch, mySRH;
   try {                                                         // passively learn the library id whenever Squarespace itself calls the media API
     myXHR = function (m, u) { try { rememberLib(libIdFrom(String(u))); } catch (e) {} return origXHR.apply(this, arguments); };
     myFetch = function (a) { try { rememberLib(libIdFrom(typeof a === 'string' ? a : a && a.url)); } catch (e) {} return origFetch.apply(this, arguments); };
-    shell.XMLHttpRequest.prototype.open = myXHR; shell.fetch = myFetch;
+    mySRH = function (k, v) { try { if (/^x-sqsp-source$/i.test(k)) S.sqspSource = v; } catch (e) {} return origSRH.apply(this, arguments); };
+    shell.XMLHttpRequest.prototype.open = myXHR; shell.fetch = myFetch; shell.XMLHttpRequest.prototype.setRequestHeader = mySRH;
   } catch (e) {}
   function libCandidates() {
     var c = [S.libId], seen = {};
@@ -604,10 +605,34 @@
       return once();
     });
   }
-  function uploadAsset(blob, name) {                            // wire the real endpoint via window.parent.__codeStockerUpload = async (blob, name) => url
+  function deepUrl(o) {
+    if (!o || typeof o !== 'object') return '';
+    if (typeof o.assetUrl === 'string') return o.assetUrl;
+    var k, v, r;
+    for (k in o) { v = o[k]; if (typeof v === 'string' && /^https:\/\/images\.squarespace-cdn\.com\//.test(v)) return v; }
+    for (k in o) { r = typeof o[k] === 'object' && deepUrl(o[k]); if (r) return r; }
+    return '';
+  }
+  function uploadDefault(blob, name) {                          // POST media-api /uploads/image, multipart field "image"
+    var ids = libCandidates(); if (!ids.length) return Promise.reject(new Error('Library not found. Open the Asset Library once, then retry'));
+    var id = ids[0], fd = new shell.FormData(); fd.append('image', blob, name);
+    var hd = { 'Accept': 'application/json', 'X-Library-Id': id }; if (S.sqspSource) hd['X-sqsp-source'] = S.sqspSource;
+    return origFetch.call(shell, MEDIA + 'uploads/image', { method: 'POST', credentials: 'include', headers: hd, body: fd }).then(function (r) {
+      return r.text().then(function (t) {
+        if (!r.ok) throw new Error('Upload failed (HTTP ' + r.status + ') ' + t.replace(/\s+/g, ' ').slice(0, 140));
+        var j = null; try { j = JSON.parse(t); } catch (e) {}
+        var u = deepUrl(j);
+        if (!u && j && (j.id || (j.asset && j.asset.id))) {      // fall back to the CDN pattern seen in library records
+          var aid = j.id || j.asset.id; u = 'https://images.squarespace-cdn.com/content/' + id + '/' + aid + '/' + encodeURIComponent(name);
+        }
+        if (!u) throw new Error('Upload succeeded but the reply had no image URL: ' + t.replace(/\s+/g, ' ').slice(0, 140));
+        rememberLib(id); return u;
+      });
+    });
+  }
+  function uploadAsset(blob, name) {                            // override with window.parent.__codeStockerUpload = async (blob, name) => url
     var f = shell.__codeStockerUpload;
-    if (typeof f !== 'function') return Promise.reject(new Error('Upload to the Asset Library is not connected yet'));
-    return Promise.resolve(f(blob, name)).then(function (r) { return typeof r === 'string' ? r : r.url; });
+    return (typeof f === 'function' ? Promise.resolve(f(blob, name)) : uploadDefault(blob, name)).then(function (r) { return typeof r === 'string' ? r : r.url; });
   }
   function insertImage(url, alt) {
     apply(function (src, root) {
@@ -847,7 +872,7 @@
   check();
 
   function dispose() {
-    try { if (shell.XMLHttpRequest.prototype.open === myXHR) shell.XMLHttpRequest.prototype.open = origXHR; if (shell.fetch === myFetch) shell.fetch = origFetch; } catch (e) {}
+    try { if (shell.XMLHttpRequest.prototype.open === myXHR) shell.XMLHttpRequest.prototype.open = origXHR; if (shell.fetch === myFetch) shell.fetch = origFetch; if (shell.XMLHttpRequest.prototype.setRequestHeader === mySRH) shell.XMLHttpRequest.prototype.setRequestHeader = origSRH; } catch (e) {}
     RT.forEach(function (t) { SD.removeEventListener(t, rec, true); });
     mo.disconnect(); clearInterval(iv); closePanel(); styleEl.remove();
     document.removeEventListener('dblclick', onDbl, true); shell.removeEventListener('resize', place);

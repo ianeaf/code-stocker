@@ -702,7 +702,7 @@
     } catch (e) {}
   }
   function closePanel() {
-    S.picking = false;
+    S.picking = false; S.verified = false;
     clearTimeout(S.timer); clearTimeout(S.resyncT);
     if (S.mo) S.mo.disconnect();
     if (S.panel) S.panel.remove();
@@ -716,6 +716,17 @@
     else left = W - PANEL_W - 8;
     var top = Math.max(8, r.top), height = Math.max(240, Math.min(r.height || H - 16, H - top - 8));
     var st = S.panel.style; st.left = left + 'px'; st.top = top + 'px'; st.height = height + 'px';
+    if (S.panel.parentNode !== SD.body && !S.verified) verifyMount(left, top);
+  }
+  function verifyMount(left, top) {                            // if nesting made the panel clipped / shifted / hidden, go back to <body>
+    var pn = S.panel;
+    var test = function () {
+      if (!pn || !pn.isConnected || pn.parentNode === SD.body) return;
+      var r = pn.getBoundingClientRect(), hit = SD.elementFromPoint(r.left + r.width / 2, r.top + Math.min(40, r.height / 2));
+      var ok = r.width > 0 && Math.abs(r.left - left) < 3 && Math.abs(r.top - top) < 3 && hit && pn.contains(hit);
+      if (!ok) { SD.body.appendChild(pn); if (shell.console) shell.console.warn('[code-stocker] nested mount failed, moved panel to <body>'); }
+    };
+    S.verified = true; setTimeout(test, 60); setTimeout(test, 600);
   }
   var ring = [];
   function rec(e) {
@@ -727,7 +738,7 @@
     var d = findDialog();
     if (S.dialog && (!S.dialog.isConnected || d !== S.dialog)) { if (S.picking && shell.console) shell.console.warn('[code-stocker] dialog closed while picker open. Last events:\n' + ring.join('\n')); closePanel(); }
     if (d && !S.dialog) openFor(d);
-    else place();
+    else { if (S.panel && !S.panel.isConnected) SD.body.appendChild(S.panel); place(); }
   }
 
   /* ───────────────────────── 9. Boot ───────────────────────── */

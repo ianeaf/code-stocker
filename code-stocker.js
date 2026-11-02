@@ -298,11 +298,16 @@
     '.sqf-img>div{flex:1;min-width:0}',
     '.sqf-pick{position:absolute;inset:0;background:#fff;z-index:2;display:flex;flex-direction:column;border-radius:var(--r,4px)}',
     '.sqf-grid{flex:1;overflow:auto;padding:0 16px 16px;display:grid;grid-template-columns:repeat(auto-fill,minmax(62px,1fr));gap:6px;align-content:start;grid-auto-rows:auto}',
-    '.sqf-th{position:relative;display:block;width:100%;aspect-ratio:1/1;border:1px solid #e3e3e3;border-radius:var(--r,4px);background:#f0f0f0;padding:0;cursor:pointer;overflow:hidden}',
-    '.sqf-th img{position:absolute;inset:0;width:100%;height:100%;object-fit:cover;display:block}',
+    '.sqf-th{position:relative;display:block;width:100%;height:0;padding:0 0 100% 0;border:0;box-shadow:inset 0 0 0 1px #e3e3e3;border-radius:var(--r,4px);background:#f0f0f0;cursor:pointer;overflow:hidden}',
+    '.sqf-th img{position:absolute;left:0;top:0;width:100%;height:100%;object-fit:contain;display:block}',
     '.sqf-th span{position:absolute;left:0;right:0;bottom:0;padding:10px 4px 3px;font-size:9px;line-height:1.1;color:#fff;background:linear-gradient(transparent,rgba(0,0,0,.65));overflow:hidden;white-space:nowrap;text-overflow:ellipsis;opacity:0;transition:opacity .12s;text-align:left}',
     '.sqf-th:hover span,.sqf-th:focus-visible span{opacity:1}',
-    '.sqf-th:hover{border-color:#111}',
+    '.sqf-th:hover{box-shadow:inset 0 0 0 2px #111}',
+    '.sqf-rt{display:flex;align-items:center}',
+    '.sqf-plus{width:24px;height:24px;margin-left:8px;border:1px solid #111;background:#fff;border-radius:var(--r,4px);cursor:pointer;font-size:17px;line-height:1;padding:0;color:#111}',
+    '.sqf-plus:hover{background:#111;color:#FFD60A}',
+    '.sqf-up .sqf-im{display:flex;gap:10px;align-items:center;margin-top:12px}.sqf-up .sqf-im img{width:48px;height:48px;object-fit:contain;background:#f0f0f0;border-radius:var(--r,4px)}',
+    '.sqf-up .sqf-im b{display:block;font-size:12px;word-break:break-all}',
     '.sqf-empty{color:#777;padding:18px 0;font-size:12px}',
     '.sqf-foot{border-top:1px solid #ececec;padding:8px 16px;font-size:11px;color:#777}'
   ].join('\n');
@@ -327,8 +332,10 @@
       return h('button', { class: 'sqf-chip', type: 'button', 'data-f': f, 'aria-pressed': f === 'all', text: f.charAt(0).toUpperCase() + f.slice(1), onclick: function () { S.filter = f; Array.prototype.forEach.call(chips.children, function (c) { c.setAttribute('aria-pressed', c.getAttribute('data-f') === f); }); applyFilter(); } });
     }));
     var body = h('div', { class: 'sqf-b' });
+    var fileI = h('input', { type: 'file', accept: 'image/*', hidden: true, onchange: function () { if (this.files && this.files[0]) addImage(this.files[0]); this.value = ''; } });
+    var plus = h('button', { type: 'button', class: 'sqf-plus', text: '+', title: 'Add image (auto-compress, rename, alt text)', 'aria-label': 'Add image', onclick: function () { fileI.click(); } });
     var panel = h('div', { class: 'sqf', role: 'complementary', 'aria-label': 'Code Stocker' }, [
-      h('div', { class: 'sqf-top' }, [h('div', { class: 'r' }, [h('span', { class: 'sqf-t', text: 'Code Stocker' }), status])]),
+      h('div', { class: 'sqf-top' }, [h('div', { class: 'r' }, [h('span', { class: 'sqf-t', text: 'Code Stocker' }), h('span', { class: 'sqf-rt' }, [status, plus, fileI])])]),
       h('div', { class: 'sqf-tools' }, [search, chips]),
       body,
       h('div', { class: 'sqf-foot', text: 'Edits update the editor. Nothing is live until you click Save.' })
@@ -509,25 +516,32 @@
   function openPicker(done) {
     S.picking = true;
     function shut() { S.picking = false; setTimeout(function () { ov.remove(); }, 0); }
-    var items = [], next = '', total = 0, libId = '', busy = false, fallback = false;
-    var grid = h('div', { class: 'sqf-grid' }), more = h('button', { type: 'button', class: 'sqf-btn', text: 'Load more', onclick: function () { load(); } });
+    var items = [], next = '', total = 0, libId = '', busy = false, fallback = false, cache = {};
+    var grid = h('div', { class: 'sqf-grid' }), sentinel = h('div', { style: 'grid-column:1/-1;min-height:28px;text-align:center;font-size:11px;color:#777;padding-top:6px' });
     var info = h('div', { class: 'sqf-note', style: 'padding:0 16px 8px' });
     var q = h('input', { type: 'text', placeholder: 'Search (date, size, name)', 'aria-label': 'Search images' });
     var manual = h('input', { type: 'text', placeholder: 'Or paste an image URL, press Enter' });
     var ov = h('div', { class: 'sqf-pick' }, [
-      h('div', { class: 'sqf-h' }, [h('span', { class: 'sqf-t', text: 'Asset Library' }), h('button', { type: 'button', class: 'sqf-ib', text: '×', 'aria-label': 'Close', onclick: shut })]),
+      h('div', { class: 'sqf-h', style: 'justify-content:flex-start;gap:10px' }, [h('button', { type: 'button', class: 'sqf-ib', text: '←', 'aria-label': 'Back', onclick: shut }), h('span', { class: 'sqf-t', text: 'Asset Library' })]),
       h('div', { class: 'sqf-tools' }, [q, h('div', { style: 'height:8px' }), manual]),
       info, grid
     ]);
+    function tile(a) {
+      return cache[a.url] || (cache[a.url] = h('button', { type: 'button', class: 'sqf-th', title: a.label, onclick: function () { done(a.url); shut(); } }, [h('img', { src: a.thumb, alt: '', loading: 'lazy' }), h('span', { text: a.label })]));
+    }
     function draw() {
       grid.textContent = '';
       var t = q.value.toLowerCase().trim(), list = items.filter(function (a) { return !t || a.q.indexOf(t) > -1; });
-      if (!list.length) grid.appendChild(h('div', { class: 'sqf-empty', text: busy ? 'Loading…' : 'No images found' + (next ? ' yet. Try Load more.' : '.') }));
-      list.forEach(function (a) {
-        grid.appendChild(h('button', { type: 'button', class: 'sqf-th', title: a.label, onclick: function () { done(a.url); shut(); } }, [h('img', { src: a.thumb, alt: '', loading: 'lazy' }), h('span', { text: a.label })]));
-      });
-      if (next && !fallback) { more.disabled = busy; more.textContent = busy ? 'Loading…' : 'Load more (' + items.length + ' of ' + total + ')'; more.style.gridColumn = '1 / -1'; grid.appendChild(more); }
+      list.forEach(function (a) { grid.appendChild(tile(a)); });
+      sentinel.textContent = busy ? 'Loading…' : (!list.length ? 'No images found' + (next ? ' yet' : '') : '');
+      grid.appendChild(sentinel);
       info.textContent = fallback ? 'Could not reach the Asset Library, showing images found on this page. Open the library once in the editor and try again.' : (total ? total + ' images in your library' : '');
+      requestAnimationFrame(more);
+    }
+    function more() {                                           // infinite scroll: load while the end of the grid is near the viewport
+      if (!next || busy || fallback || !ov.isConnected) return;
+      var g = grid.getBoundingClientRect(), s = sentinel.getBoundingClientRect();
+      if (s.top < g.bottom + 400) load();
     }
     function take(j) {
       var a = (j && j.assets) || {}; next = a.next || ''; total = a.total || total || 0;
@@ -537,12 +551,12 @@
       if (busy) return; busy = true; draw();
       var go;
       if (libId) go = libGet(libId, next || MEDIA + 'user/libraries/' + libId + '/folders/root/assets?order=DESC&orderBy=CREATED_AT&assetTypes=IMAGE&limit=72&offset=0').then(take);
-      else {                                                    // find a library id that the API accepts
+      else {
         var ids = libCandidates(), i = 0;
         var tryNext = function () {
           if (i >= ids.length) return Promise.reject(new Error('no library id'));
           var id = ids[i++];
-          return libGet(id, MEDIA + 'user/libraries/' + id + '/folders/root/assets?order=DESC&orderBy=CREATED_AT&assetTypes=IMAGE&limit=72&offset=0').then(function (j) { libId = id; rememberLib(id); take(j); }, tryNext);
+          return libGet(id, MEDIA + 'user/libraries/' + id + '/folders/root/assets?order=DESC&orderBy=CREATED_AT&assetTypes=IMAGE&limit=72&offset=0').then(function (j) { libId = id; rememberLib(id); S.libId = id; take(j); }, tryNext);
         };
         go = tryNext();
       }
@@ -552,9 +566,86 @@
         draw();
       });
     }
+    grid.addEventListener('scroll', more);
     q.addEventListener('input', draw);
     manual.addEventListener('keydown', function (e) { if (e.key === 'Enter' && manual.value.trim()) { done(manual.value.trim()); shut(); } });
     S.panel.appendChild(ov); draw(); load(); q.focus();
+  }
+
+  /* ── "+" add image: quick scan → compress under 500 KB → SEO file name → alt text → upload → insert ── */
+  var MAXB = 500 * 1024;
+  function kb(n) { return n >= 1048576 ? (n / 1048576).toFixed(1) + ' MB' : Math.max(1, Math.round(n / 1024)) + ' KB'; }
+  function slug(t) { return t.toLowerCase().normalize('NFKD').replace(/[̀-ͯ]/g, '').replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '').slice(0, 60); }
+  function nameAlt(base) {
+    var sl = slug(base), generic = !sl || sl.length < 3 || /^\d+$/.test(sl) || /^(img|dsc|dscn|image|photo|pxl|screenshot|screen-shot|untitled|capture|download|unnamed)(-|$)/.test(sl);
+    var d = new Date(), stamp = d.getFullYear() + ('0' + (d.getMonth() + 1)).slice(-2) + ('0' + d.getDate()).slice(-2);
+    var name = generic ? 'image-' + stamp + '-' + Math.random().toString(36).slice(2, 6) : sl;
+    var alt = generic ? 'Image' : sl.replace(/-/g, ' ').replace(/^./, function (c) { return c.toUpperCase(); });
+    return { name: name, alt: alt };
+  }
+  function squeeze(file) {                                      // resolves {blob, ext, changed}
+    var t = file.type, ext = (t.split('/')[1] || 'img').replace('jpeg', 'jpg');
+    if (!/^image\/(jpeg|png|webp)$/.test(t)) return Promise.resolve({ blob: file, ext: ext.replace('svg+xml', 'svg'), changed: false });
+    return shell.createImageBitmap(file).then(function (bmp) {
+      var w = bmp.width, h2 = bmp.height, scale = Math.min(1, 2400 / Math.max(w, h2));
+      if (file.size <= MAXB && scale === 1) return { blob: file, ext: ext, changed: false };
+      var q = 0.86, type = 'image/webp', tries = 0;
+      function once() {
+        var c = SD.createElement('canvas'); c.width = Math.max(1, Math.round(w * scale)); c.height = Math.max(1, Math.round(h2 * scale));
+        c.getContext('2d').drawImage(bmp, 0, 0, c.width, c.height);
+        return new Promise(function (res) { c.toBlob(res, type, q); }).then(function (b) {
+          if (b && b.type !== type) { type = 'image/jpeg'; return once(); }   // browser can't encode WebP
+          if (!b) throw new Error('Could not compress this image');
+          if (b.size <= MAXB || ++tries > 24) return { blob: b, ext: type === 'image/webp' ? 'webp' : 'jpg', changed: true };
+          if (q > 0.6) q -= 0.12; else { scale *= Math.max(0.5, Math.sqrt(MAXB / b.size) * 0.92); q = 0.7; }
+          return once();
+        });
+      }
+      return once();
+    });
+  }
+  function uploadAsset(blob, name) {                            // wire the real endpoint via window.parent.__codeStockerUpload = async (blob, name) => url
+    var f = shell.__codeStockerUpload;
+    if (typeof f !== 'function') return Promise.reject(new Error('Upload to the Asset Library is not connected yet'));
+    return Promise.resolve(f(blob, name)).then(function (r) { return typeof r === 'string' ? r : r.url; });
+  }
+  function insertImage(url, alt) {
+    apply(function (src, root) {
+      var esc = function (v) { return v.replace(/"/g, '&quot;'); }, tag = '<img src="' + esc(url) + '" alt="' + esc(alt) + '">';
+      var tops = root.children.filter(function (c) { return c.tag !== 'style' && c.tag !== 'script'; });
+      if (!tops.length) return src + (src && !/\n$/.test(src) ? '\n' : '') + tag + '\n';
+      var last = tops[tops.length - 1];
+      return splice(src, last.innerEnd, last.innerEnd, '\n  ' + tag + '\n');
+    });
+  }
+  function addImage(file) {
+    var msg = h('div', { class: 'sqf-note', text: 'Compressing…' });
+    var card = h('div', { class: 'sqf-card sqf-up' }, [h('label', { class: 'sqf-l', text: 'Adding image' }), msg]);
+    S.notice = card; S.body.insertBefore(card, S.body.firstChild); S.body.scrollTop = 0;
+    var meta = nameAlt(file.name.replace(/\.[^.]+$/, ''));
+    squeeze(file).then(function (res) {
+      var fname = meta.name + '.' + res.ext, blob = res.blob;
+      var sizeTxt = res.changed ? kb(blob.size) + ' (was ' + kb(file.size) + ')' : kb(blob.size);
+      msg.textContent = 'Uploading ' + fname + ' · ' + sizeTxt + '…';
+      var local = URL.createObjectURL(blob);
+      return uploadAsset(blob, fname).then(function (url) {
+        insertImage(url, meta.alt); render();
+        var alt = meta.alt, altI = h('input', { type: 'text', 'aria-label': 'Alt text', hidden: true });
+        altI.value = alt;
+        var altTxt = h('div', { class: 'sqf-note', text: 'Alt: ' + alt });
+        var pen = h('button', { type: 'button', class: 'sqf-ib', text: '✎', title: 'Edit alt text', 'aria-label': 'Edit alt text', onclick: function () { altI.hidden = !altI.hidden; if (!altI.hidden) altI.focus(); } });
+        altI.addEventListener('input', function () {
+          apply(function (s2, r2) { var found = null; (function w(e) { e.children.forEach(function (c) { if (!found && c.tag === 'img' && attr(s2, c, 'src') === url.replace(/"/g, '&quot;')) found = c; w(c); }); })(r2); return found ? setAttr(s2, found, 'alt', altI.value) : null; });
+          altTxt.textContent = 'Alt: ' + altI.value; refresh();
+        });
+        var done = h('div', { class: 'sqf-card sqf-up' }, [h('label', { class: 'sqf-l', text: 'Image added' }),
+          h('div', { class: 'sqf-im' }, [h('img', { src: local, alt: '' }), h('div', { style: 'flex:1;min-width:0' }, [h('b', { text: fname }), h('div', { class: 'sqf-note', style: 'margin:2px 0 0', text: sizeTxt }), altTxt]), pen]), altI]);
+        S.notice = done; S.body.insertBefore(done, S.body.firstChild);
+      }, function (err) {
+        msg.textContent = err.message + '. Compressed to ' + fname + ' (' + sizeTxt + ') but not added to your code.';
+        card.appendChild(h('a', { class: 'sqf-btn', href: local, download: fname, text: 'Download compressed file', style: 'text-decoration:none;text-align:center;color:inherit' }));
+      });
+    }).catch(function (e) { msg.textContent = 'Could not process this image: ' + e.message; });
   }
 
   function repeaterView(node, src, root) {
@@ -632,6 +723,7 @@
     var scroll = S.body.scrollTop; src0 = S.src;
     var root = parse(S.src), nodes = collectAll(S.src, root);
     S.controls = []; S.body.textContent = ''; S.sig = signature(nodes);
+    if (S.notice) S.body.appendChild(S.notice);
     if (!nodes.length) S.body.appendChild(h('div', { class: 'sqf-empty', text: S.src.trim() ? 'No editable text, links or images found in this code.' : 'This Code Block is empty. Add HTML and its fields appear here.' }));
     renderNodes(nodes, S.src, root).forEach(function (n) { S.body.appendChild(n); });
     applyFilter(); S.body.scrollTop = scroll;

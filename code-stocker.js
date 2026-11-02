@@ -327,6 +327,7 @@
     '.sqf-chip[aria-pressed=true]{background:#1a1a1a;border-color:#1a1a1a;color:#fff}',
     '.sqf-b{flex:1;overflow:auto;padding:4px 16px 16px}',
     '.sqf-l{display:block;font-size:10.5px;letter-spacing:.09em;text-transform:uppercase;font-weight:600;color:#555;margin:14px 0 6px}',
+    '.sqf textarea{min-height:34px;line-height:1.4;overflow:hidden}',
     '.sqf input[type=text],.sqf textarea{width:100%;border:1px solid #cfcfcf;border-radius:var(--r,4px);padding:7px 9px;font:inherit;color:#1a1a1a;background:#fff;resize:none;display:block}',
     '.sqf input[type=text]:focus,.sqf textarea:focus{outline:none;border-color:#1a1a1a}',
     '.sqf .inv{border-color:#b3261e!important}.sqf-err{color:#b3261e;font-size:11px;margin-top:4px}',
@@ -452,7 +453,12 @@
     function coreOf(s, root) { var e = find(root, path); if (!e) return ''; return s.slice(e.innerStart, e.innerEnd).trim(); }
     var ta = h('textarea', { rows: 1, 'aria-label': label });
     var err = h('div', { class: 'sqf-err', hidden: true });
-    function fit() { ta.style.height = 'auto'; ta.style.height = Math.min(ta.scrollHeight + 2, 180) + 'px'; }
+    function fit() {                                              // only measurable while visible; re-run whenever a section opens
+      if (!ta.offsetParent) return;
+      ta.style.height = 'auto'; var sh = ta.scrollHeight + 2;
+      ta.style.height = Math.max(34, Math.min(sh, 260)) + 'px'; ta.style.overflowY = sh > 260 ? 'auto' : 'hidden';
+    }
+    ta.__fit = fit;
     ta.value = coreOf(src, parse(src));
     ta.addEventListener('input', function () {
       var root = parse(S.src), e = find(root, path); if (!e) return;
@@ -777,7 +783,7 @@
         h('div', { class: 'sqf-in' }, renderNodes(it.nodes, src, root))
       ]);
       if (S.open[key] !== false && (S.open[key] || n <= 3 && idx === 0)) det.open = true;
-      det.addEventListener('toggle', function () { S.open[key] = det.open; });
+      det.addEventListener('toggle', function () { S.open[key] = det.open; refit(); });
       box.appendChild(det);
     });
     if (!editOnly && n > 1) {
@@ -902,6 +908,7 @@
         bh.addEventListener('click', function () {
           S.blk = S.blk === b.key ? '' : b.key;
           Array.prototype.forEach.call(S.body.querySelectorAll('.sqf-blk'), function (x) { var on = x.getAttribute('data-k') === S.blk; x.classList.toggle('on', on); x.firstChild.setAttribute('aria-expanded', on); });
+          refit();
         });
         S.body.appendChild(box); boxes.push(box);
       });
@@ -936,6 +943,7 @@
       if (c.bool) c.el.setAttribute('aria-checked', v); else if (c.el.value !== v) c.el.value = v;
     });
   }
+  function refit() { requestAnimationFrame(function () { if (!S.body) return; Array.prototype.forEach.call(S.body.querySelectorAll('textarea'), function (t) { if (t.__fit) t.__fit(); }); }); }
   function applyFilter() {
     var fs = S.body.querySelectorAll('.sqf-f');
     Array.prototype.forEach.call(fs, function (f) {
@@ -946,6 +954,7 @@
     Array.prototype.forEach.call(S.body.querySelectorAll('details.sqf-it'), function (d) { d.hidden = !d.querySelector('.sqf-f:not([hidden])'); });
     var flt = !!(S.q || S.filter !== 'all'); S.panel.classList.toggle('flt', flt);
     Array.prototype.forEach.call(S.body.querySelectorAll('.sqf-blk'), function (b) { b.hidden = flt && !b.querySelector('.sqf-f:not([hidden])'); });
+    refit();
     Array.prototype.forEach.call(S.body.querySelectorAll('.sqf-rep'), function (g) { g.hidden = (S.q || S.filter !== 'all') && !g.querySelector('.sqf-f:not([hidden])'); });
   }
 

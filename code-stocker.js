@@ -407,6 +407,7 @@
     var body = h('div', { class: 'sqf-b' });
     var fileI = h('input', { type: 'file', accept: 'image/*', hidden: true, onchange: function () { if (this.files && this.files[0]) addImage(this.files[0]); this.value = ''; } });
     var plus = h('button', { type: 'button', class: 'sqf-plus', text: '+', title: 'Add image (auto-compress, rename, alt text)', 'aria-label': 'Add image', onclick: function () { fileI.click(); } });
+    plus.hidden = true; S.plus = plus;                          // shown only while the code contains an image
     var panel = h('div', { class: 'sqf', role: 'complementary', 'aria-label': 'Code Stocker' }, [
       h('div', { class: 'sqf-top' }, [h('div', { class: 'r' }, [h('span', { class: 'sqf-t', text: 'Code Stocker' }), h('span', { class: 'sqf-rt' }, [status, plus, fileI])])]),
       h('div', { class: 'sqf-tools' }, [search, chips]),
@@ -915,10 +916,16 @@
 
   /* render / refresh / filter */
   function signature(nodes) { return nodes.map(function (n) { return n.type === 'repeater' ? 'R' + n.items.length + '(' + n.items.map(function (i) { return signature(i.nodes); }).join('|') + ')' : n.type[0] + n.path.join('.'); }).join(','); }
+  function hasImages(root) {
+    var found = false;
+    (function w(e) { e.children.forEach(function (c) { if (found || SKIP[c.tag]) return; if (c.tag === 'img') { found = true; return; } w(c); }); })(root);
+    return found;
+  }
   function render() {
     if (!S.panel) return;
     var scroll = S.body.scrollTop; src0 = S.src;
     var root = parse(S.src), nodes = collectAll(S.src, root);
+    if (S.plus) S.plus.hidden = !hasImages(root);
     S.controls = []; S.body.textContent = ''; S.sig = signature(nodes);
     if (S.notice) S.body.appendChild(S.notice);
     if (!nodes.length) S.body.appendChild(h('div', { class: 'sqf-empty', text: S.src.trim() ? 'No editable text, links or images found in this code.' : 'This Code Block is empty. Add HTML and its fields appear here.' }));
@@ -965,6 +972,7 @@
   function refresh() {                                            // in-place value sync; re-render only if structure moved
     src0 = S.src;
     var root = parse(S.src), nodes = collectAll(S.src, root);
+    if (S.plus) S.plus.hidden = !hasImages(root);
     if (signature(nodes) !== S.sig) { render(); return; }
     S.controls.forEach(function (c) {
       if (c.el === SD.activeElement) return;

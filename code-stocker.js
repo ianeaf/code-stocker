@@ -119,7 +119,52 @@
   function classKey(src, el) { return (attr(src, el, 'class') || '').trim().replace(/\s+/g, ' '); }
   function repeatable(src, el) { return el.tag === 'li' || (el.children.length > 0 && !textual(src, el) && !INLINE[el.tag]); }
 
-  /* Build a tree of {type:'text'|'link'|'image'|'repeater'} nodes from the source. */
+  /* ── tables: <table> and ARIA grids (role=table/grid with role=row / role=cell children) ── */
+  function isTable(src, el) { var r = attr(src, el, 'role'); return el.tag === 'table' || r === 'table' || r === 'grid'; }
+  function tableRows(src, tb) {
+    var rows = [], role = tb.tag !== 'table';
+    (function w(e, sec) {
+      e.children.forEach(function (c) {
+        if (SKIP[c.tag]) return;
+        if (!role) {
+          if (c.tag === 'tr') rows.push({ el: c, sec: sec });
+          else if (c.tag === 'thead' || c.tag === 'tbody' || c.tag === 'tfoot') w(c, c.tag);
+        } else {
+          var r = attr(src, c, 'role');
+          if (r === 'row') { rows.push({ el: c, sec: '' }); return; }
+          if (c.tag === 'table' || r === 'table' || r === 'grid') return;
+          w(c, '');
+        }
+      });
+    })(tb, '');
+    return rows;
+  }
+  function cellsOf(src, row, role) {
+    return row.children.filter(function (c) { return role ? /^(cell|columnheader|rowheader|gridcell)$/.test(attr(src, c, 'role')) : (c.tag === 'td' || c.tag === 'th'); });
+  }
+  function isHeadCell(src, c) { return c.tag === 'th' || /^(columnheader|rowheader)$/.test(attr(src, c, 'role')); }
+  function cellTarget(src, cell) {                              // the element whose inner text a cell box edits, or null for rich cells
+    var e = cell;
+    for (var d = 0; d < 3; d++) {
+      if (!e.raw && inlineOnly(e)) return e;
+      var kids = e.children.filter(function (c) { return !SKIP[c.tag]; });
+      if (kids.length === 1 && /^(p|div|span)$/.test(kids[0].tag) && src.slice(e.innerStart, kids[0].start).trim() === '' && src.slice(kids[0].end, e.innerEnd).trim() === '') { e = kids[0]; continue; }
+      return null;
+    }
+    return null;
+  }
+  function multiSplice(src, edits) {                            // edits: [[from, to, text]] on the same source, non-overlapping
+    edits.sort(function (a, b) { return b[0] - a[0]; });
+    edits.forEach(function (e) { src = src.slice(0, e[0]) + e[2] + src.slice(e[1]); });
+    return src;
+  }
+  function delRange(src, el) {                                   // element plus its leading indentation and one preceding newline
+    var from = el.start; while (from > 0 && /[ \t]/.test(src.charAt(from - 1))) from--;
+    if (from > 0 && src.charAt(from - 1) === '\n') from--;
+    return [from, el.end, ''];
+  }
+
+  /* Build a tree of {type:'text'|'link'|'image'|'repeater'|'table'} nodes from the source. */
   function collectAll(src, root) {
     var out = [];
     collect(root, out);
@@ -139,19 +184,20 @@
       }
       return res;
     }
-    function count(nodes) { var n = 0; nodes.forEach(function (x) { n += x.type === 'repeater' ? x.items.reduce(function (a, it) { return a + count(it.nodes); }, 0) : 1; }); return n; }
+    function count(nodes) { var n = 0; nodes.forEach(function (x) { n += x.type === 'table' ? x.rows.reduce(function (a, r) { return a + r.cells.length; }, 0) : x.type === 'repeater' ? x.items.reduce(function (a, it) { return a + count(it.nodes); }, 0) : 1; }); return n; }
     function snip(n) { return src.slice(n.el.innerStart, n.el.innerEnd).replace(/<[^>]*>/g, '').replace(/&nbsp;/g, ' ').replace(/\s+/g, ' ').trim().slice(0, 44); }
     function firstSnippet(nodes, headingOnly) {
       var i, n, r;
       for (i = 0; i < nodes.length; i++) { n = nodes[i]; if (n.type === 'text' && /^h[1-4]$/.test(n.el.tag) && (r = snip(n))) return r; }
       for (i = 0; i < nodes.length; i++) { n = nodes[i]; if (n.type === 'repeater' && n.items.length && (r = firstSnippet(n.items[0].nodes, headingOnly))) return r; }
+      for (i = 0; i < nodes.length; i++) { n = nodes[i]; if (n.type === 'table' && n.title) return n.title; }
       if (headingOnly) return '';
       for (i = 0; i < nodes.length; i++) { n = nodes[i]; if (n.type === 'text' && (r = snip(n))) return r; }
       return '';
     }
     function kindName(nodes) {
       var t = {}; nodes.forEach(function (n) { t[n.type] = 1; });
-      return t.image && !t.text ? 'Image' : (t.link && !t.text ? 'Link' : 'Section');
+      return t.table && !t.text ? 'Table' : t.image && !t.text ? 'Image' : (t.link && !t.text ? 'Link' : 'Section');
     }
     function findBlocks() {
       var cont = root, g = [];
@@ -167,6 +213,7 @@
       });
       blocks.forEach(function (b) {
         b.count = count(b.nodes); b.sub = '';
+        b.flat = b.nodes.length > 0 && b.nodes.every(function (n) { return n.type === 'table'; });      // tables are always shown, never folded away
         if (b.nodes.length === 1 && b.nodes[0].type === 'repeater') {          // a repeated group: name it by the first few entries
           var names = b.nodes[0].items.map(function (it) { return firstSnippet(it.nodes); }).filter(Boolean).slice(0, 3);
           b.title = names.length ? names.join(' · ') : b.nodes[0].label;
@@ -188,8 +235,30 @@
         one(c, out); i++;
       }
     }
+    function tableNode(tb) {
+      var role = tb.tag !== 'table', rows = tableRows(src, tb); if (!rows.length) return null;
+      var hasHead = rows.some(function (r) { return r.sec === 'thead'; }), ncols = 0, colspan = false, rowspan = false, ragged = false, firstLen = -1;
+      rows.forEach(function (r, ri) {
+        var cells = cellsOf(src, r.el, role);
+        r.cells = cells.map(function (ce) {
+          var cs = parseInt(attr(src, ce, 'colspan'), 10), rs = parseInt(attr(src, ce, 'rowspan'), 10);
+          if (cs > 1) colspan = true; if (rs > 1) rowspan = true;
+          var tgt = cellTarget(src, ce), nodes = []; if (!tgt) one(ce, nodes);
+          return { el: ce, target: tgt, nodes: nodes, header: isHeadCell(src, ce) };
+        });
+        r.header = r.sec === 'thead' || (!hasHead && ri === 0 && r.cells.length > 0 && r.cells.every(function (c) { return c.header; }));
+        r.body = !r.header && r.sec !== 'tfoot';
+        if (firstLen < 0) firstLen = r.cells.length; else if (r.cells.length !== firstLen) ragged = true;
+        ncols = Math.max(ncols, r.cells.length);
+      });
+      if (!ncols) return null;
+      var head = rows.filter(function (r) { return r.header; })[0], names = [];
+      (head ? head.cells : rows[0].cells).forEach(function (c) { var t = c.target && src.slice(c.target.innerStart, c.target.innerEnd).replace(/<[^>]*>/g, '').trim(); if (t) names.push(t.slice(0, 18)); });
+      return { type: 'table', path: pathOf(tb), el: tb, role: role, rows: rows, ncols: ncols, colspan: colspan, rowspan: rowspan, ragged: ragged, title: names.slice(0, 3).join(' · ') };
+    }
     function one(c, out) {
       if (SKIP[c.tag]) return;
+      if (isTable(src, c)) { var tn = tableNode(c); if (tn) { out.push(tn); return; } }
       var p = pathOf(c);
       if (c.tag === 'a' && c.attrs.href) {
         out.push({ type: 'link', path: p, el: c });
@@ -362,6 +431,26 @@
     '.sqf-th:hover span,.sqf-th:focus-visible span{opacity:1}',
     '.sqf-th:hover{box-shadow:inset 0 0 0 2px #111}',
     '.sqf [hidden]{display:none!important}',
+    '.sqf-ts{overflow-x:auto;margin-top:8px;border:1px solid #e3e3e3;border-radius:var(--r,4px)}',
+    '.sqf-tbl{border-collapse:collapse;table-layout:fixed;width:100%}',
+    '.sqf-tbl td,.sqf-tbl th{padding:0;border:1px solid #ececec;vertical-align:top;font-weight:inherit;text-align:left;background:#fff}',
+    '.sqf-tbl tr.hd th,.sqf-tbl tr.hd td{background:#f6f6f2}',
+    '.sqf-tbl tr.hd textarea{font-weight:600}',
+    '.sqf-tbl th textarea{font-weight:600}',
+    '.sqf-tbl td.sqf-gr,.sqf-tbl td.sqf-rmc{width:18px;border:0;background:#fff;vertical-align:middle;text-align:center}',
+    '.sqf-tbl td.sqf-gr .g{display:inline-block;opacity:.35}.sqf-tbl tr:hover .g{opacity:1}',
+    '.sqf-tbl .sqf-rmc .sqf-ib,.sqf-tbl tr.cc .sqf-ib{opacity:0;width:18px;height:18px;font-size:11px}.sqf-tbl tr:hover .sqf-rmc .sqf-ib,.sqf-tbl tr.cc:hover .sqf-ib,.sqf-tbl:hover tr.cc .sqf-ib{opacity:1}',
+    '.sqf-tbl tr.cc td{border:0;text-align:center;background:#fff;height:20px}',
+    '.sqf-tbl td.pad{background:#fafafa}',
+    '.sqf-cell{position:relative;min-width:0}',
+    '.sqf-cell textarea{border:0!important;border-radius:0!important;padding:6px 7px!important;font-size:12px;min-height:30px;background:transparent!important}',
+    '.sqf-cell textarea:focus{box-shadow:inset 0 0 0 2px #111}',
+    '.sqf-cell.cx{padding:0 6px 6px}.sqf-cell.cx .sqf-l{margin:8px 0 4px}.sqf-cell.cx .sqf-card{margin-top:6px;padding:0 8px 8px}',
+    '.sqf-nocell{color:#aaa;padding:6px 8px;font-size:12px}',
+    '.sqf-lk{position:absolute;right:2px;top:2px;border:0;background:#f0f0f0;border-radius:3px;font-size:11px;line-height:1;width:18px;height:18px;padding:0;cursor:pointer;opacity:0}.sqf-cell:hover .sqf-lk{opacity:1}',
+    '.sqf-cl{padding:0 6px 6px}.sqf-cl input{font-size:11px!important;padding:5px 6px!important}',
+    '.sqf-tact{margin-top:8px}.sqf-tact .sqf-btn.s{margin:0 8px 0 0}',
+    '.sqf-tbl tr.drop-before td,.sqf-tbl tr.drop-before th{box-shadow:inset 0 2px 0 #111}.sqf-tbl tr.drop-after td,.sqf-tbl tr.drop-after th{box-shadow:inset 0 -2px 0 #111}',
     '.sqf .g{color:#aaa;font-size:11px;letter-spacing:-2px;opacity:0;transition:opacity .1s;width:10px;flex:none;cursor:grab;user-select:none}',
     '.sqf-bh:hover .g,.sqf-it>summary:hover .g{opacity:1}',
     '.sqf-grab{cursor:grab}.sqf-grab:active{cursor:grabbing}',
@@ -795,6 +884,104 @@
     }).catch(function (e) { msg.textContent = 'Could not process this image: ' + e.message; });
   }
 
+  /* ── table view: mirrors the table so cells are edited in place ── */
+  function mkTa(label, minH) {
+    var ta = h('textarea', { rows: 1, 'aria-label': label });
+    function fit() { if (!ta.offsetParent) return; ta.style.height = 'auto'; var sh = ta.scrollHeight + 2; ta.style.height = Math.max(minH, Math.min(sh, 260)) + 'px'; ta.style.overflowY = sh > 260 ? 'auto' : 'hidden'; }
+    ta.__fit = fit; ta.addEventListener('input', fit); requestAnimationFrame(fit);
+    return ta;
+  }
+  var ID_ATTR = /(\sid\s*=\s*)("[^"]*"|'[^']*')/gi;
+  function cellLinks(src, el) { var out = []; (function w(e) { e.children.forEach(function (c) { if (c.tag === 'a' && c.attrs.href) out.push(c); w(c); }); })(el); return out; }
+  function tableView(node, src, root) {
+    var rows = node.rows, nR = rows.length, nC = node.ncols, role = node.role, tpath = node.path;
+    var bodyAll = rows.filter(function (r) { return r.body; }), lastBody = bodyAll[bodyAll.length - 1];
+    var ops = lastBody ? bodyAll.filter(function (r) { return r.el.parent === lastBody.el.parent; }) : [];
+    var rowOps = ops.length > 0 && !node.rowspan, colOps = !node.colspan && !node.rowspan && !node.ragged;
+    var opPaths = ops.map(function (r) { return pathOf(r.el); });
+    var tbl = h('table', { class: 'sqf-tbl' }), tb = h('tbody');
+    tbl.style.minWidth = (nC * 104 + 40) + 'px';
+    if (colOps && nC > 1) {                                       // column remove buttons, aligned to the columns
+      var cc = h('tr', { class: 'cc' }, [h('td', { class: 'sqf-gr' })]);
+      for (var ci = 0; ci < nC; ci++) (function (ci) { cc.appendChild(h('td', {}, [h('button', { type: 'button', class: 'sqf-ib', text: '×', title: 'Remove this column', 'aria-label': 'Remove column ' + (ci + 1), onclick: function () { tblRemoveCol(tpath, role, ci); } })])); })(ci);
+      cc.appendChild(h('td', { class: 'sqf-rmc' })); tb.appendChild(cc);
+    }
+    var dragRows = [];
+    rows.forEach(function (r) {
+      var inOps = rowOps && ops.indexOf(r) > -1, tr = h('tr', { class: r.header ? 'hd' : '' });
+      var grip = inOps && ops.length > 1 ? h('span', { class: 'g', text: '⋮⋮', title: 'Drag to reorder' }) : null;
+      tr.appendChild(h('td', { class: 'sqf-gr' }, [grip]));
+      r.cells.forEach(function (c) { tr.appendChild(h(c.header ? 'th' : 'td', {}, [cellEditor(c, src, root)])); });
+      for (var i = r.cells.length; i < nC; i++) tr.appendChild(h('td', { class: 'pad' }));
+      var rp = pathOf(r.el);
+      tr.appendChild(h('td', { class: 'sqf-rmc' }, [inOps && ops.length > 1 ? h('button', { type: 'button', class: 'sqf-ib', text: '×', title: 'Remove this row', 'aria-label': 'Remove row', onclick: function () { tblRemoveRow(rp); } }) : null]));
+      tb.appendChild(tr);
+      if (grip) dragRows.push({ el: tr, handle: grip });
+    });
+    tbl.appendChild(tb);
+    if (dragRows.length > 1) dnd(dragRows, function (f, t) { apply(function (s2, r2) { return reorderEls(s2, r2, opPaths, f, t); }); render(); }, 'drag-rows');
+    var acts = h('div', { class: 'sqf-tact' }, [
+      rowOps ? h('button', { type: 'button', class: 'sqf-btn s', text: '+ Row', onclick: function () { tblAddRow(opPaths[opPaths.length - 1], role); } }) : null,
+      colOps ? h('button', { type: 'button', class: 'sqf-btn s', text: '+ Column', onclick: function () { tblAddCol(tpath, role); } }) : null]);
+    var note = (!rowOps || !colOps) ? h('div', { class: 'sqf-note', text: node.rowspan ? 'Adding and removing rows and columns is off because the table has merged cells (rowspan).' : node.colspan ? 'Adding and removing columns is off because the table has merged cells (colspan).' : node.ragged ? 'Adding and removing columns is off because the rows have different numbers of cells.' : '' }) : null;
+    var wrap = h('div', { class: 'sqf-f sqf-tw', 'data-kind': 'text' }, [h('label', { class: 'sqf-l', text: 'Table · ' + nR + (nR === 1 ? ' row × ' : ' rows × ') + nC + (nC === 1 ? ' column' : ' columns') }), h('div', { class: 'sqf-ts' }, [tbl]), acts, note]);
+    wrap.__q = function () { return 'table ' + Array.prototype.map.call(tbl.querySelectorAll('textarea,input'), function (i) { return i.value; }).join(' '); };
+    return wrap;
+  }
+  function cellEditor(c, src, root) {
+    if (c.target) {
+      var ta = mkTa('Cell', 30); bindInner(ta, pathOf(c.target));
+      var kids = [ta], links = cellLinks(src, c.target);
+      if (links.length) {
+        var box = h('div', { class: 'sqf-cl', hidden: true }), tg = h('button', { type: 'button', class: 'sqf-lk', text: '↗', title: 'Edit link' + (links.length > 1 ? 's' : ''), 'aria-label': 'Edit links in this cell', onclick: function () { box.hidden = !box.hidden; refit(); } });
+        links.forEach(function (a) { var ap = pathOf(a); box.appendChild(simpleInput(ap, function (s2, r2) { var e = find(r2, ap); return e ? attr(s2, e, 'href') : ''; }, function (s2, e, v) { return setAttr(s2, e, 'href', v); }, 'Link URL', 'https://')); });
+        kids.push(tg, box);
+      }
+      return h('div', { class: 'sqf-cell' }, kids);
+    }
+    if (c.nodes.length) return h('div', { class: 'sqf-cell cx' }, renderNodes(c.nodes, src, root));
+    return h('div', { class: 'sqf-cell sqf-nocell', text: '—' });
+  }
+  function tblRemoveRow(rp) { apply(function (s2, r2) { var e = find(r2, rp); return e ? multiSplice(s2, [delRange(s2, e)]) : null; }); render(); }
+  function tblAddRow(lp, role) {
+    apply(function (s2, r2) {
+      var e = find(r2, lp); if (!e) return null;
+      var ls = e.start; while (ls > 0 && /[ \t]/.test(s2.charAt(ls - 1))) ls--;
+      var nl = s2.charAt(ls - 1) === '\n' ? '\n' : '', gap = s2.slice(ls, e.start), clone = s2.slice(e.start, e.end).replace(ID_ATTR, '');
+      return splice(s2, e.end, e.end, nl + gap + clone);
+    });
+    var np = lp.slice(0, -1).concat(lp[lp.length - 1] + 1);        // the new row: blank its text
+    apply(function (s2, r2) {
+      var row = find(r2, np); if (!row) return null; var edits = [];
+      cellsOf(s2, row, role).forEach(function (ce) { var t = cellTarget(s2, ce); if (!t) return; var sp = splitInner(s2.slice(t.innerStart, t.innerEnd)); edits.push([t.innerStart, t.innerEnd, (sp.lead + sp.trail).replace(/\s+/g, '')]); });
+      return edits.length ? multiSplice(s2, edits) : null;
+    });
+    render();
+  }
+  function tblAddCol(tp, role) {
+    apply(function (s2, r2) {
+      var tb = find(r2, tp); if (!tb) return null; var edits = [];
+      tableRows(s2, tb).forEach(function (row) {
+        var cells = cellsOf(s2, row.el, role); if (!cells.length) return;
+        var last = cells[cells.length - 1], ls = last.start; while (ls > 0 && /[ \t]/.test(s2.charAt(ls - 1))) ls--;
+        var nl = s2.charAt(ls - 1) === '\n' ? '\n' : '', gap = s2.slice(ls, last.start), clone;
+        if (cellTarget(s2, last) === last) { var sp = splitInner(s2.slice(last.innerStart, last.innerEnd)); clone = s2.slice(last.start, last.innerStart) + (sp.lead + sp.trail).replace(/\s+/g, '') + s2.slice(last.innerEnd, last.end); }
+        else clone = s2.slice(last.start, last.end);
+        edits.push([last.end, last.end, nl + gap + clone.replace(ID_ATTR, '')]);
+      });
+      return edits.length ? multiSplice(s2, edits) : null;
+    });
+    render();
+  }
+  function tblRemoveCol(tp, role, ci) {
+    apply(function (s2, r2) {
+      var tb = find(r2, tp); if (!tb) return null; var edits = [];
+      tableRows(s2, tb).forEach(function (row) { var cells = cellsOf(s2, row.el, role); if (cells.length > 1 && cells[ci]) edits.push(delRange(s2, cells[ci])); });
+      return edits.length ? multiSplice(s2, edits) : null;
+    });
+    render();
+  }
+
   function repeaterView(node, src, root) {
     var why = layoutCheck(src, root, node);
     var editOnly = !!why, n = node.items.length;
@@ -829,11 +1016,13 @@
     for (var i = 0; i < it.nodes.length; i++) if (it.nodes[i].type === 'text') { var e = it.nodes[i].el; return plain(src.slice(e.innerStart, e.innerEnd)) ? src.slice(e.innerStart, e.innerEnd).replace(/<[^>]*>/g, '').trim().slice(0, 48) : ''; }
     return '';
   }
+  function maxCols(nodes) { var m = 0; nodes.forEach(function (n) { if (n.type === 'table') m = Math.max(m, n.ncols); else if (n.type === 'repeater') n.items.forEach(function (it) { m = Math.max(m, maxCols(it.nodes)); }); }); return m; }
   function renderNodes(nodes, src, root) {
     return nodes.map(function (nd) {
       if (nd.type === 'text') return textField(nd, src);
       if (nd.type === 'link') return linkField(nd, src);
       if (nd.type === 'image') return imageField(nd, src);
+      if (nd.type === 'table') return tableView(nd, src, root);
       return repeaterView(nd, src, root);
     });
   }
@@ -915,7 +1104,7 @@
   }
 
   /* render / refresh / filter */
-  function signature(nodes) { return nodes.map(function (n) { return n.type === 'repeater' ? 'R' + n.items.length + '(' + n.items.map(function (i) { return signature(i.nodes); }).join('|') + ')' : n.type[0] + n.path.join('.'); }).join(','); }
+  function signature(nodes) { return nodes.map(function (n) { return n.type === 'table' ? 'T' + n.path.join('.') + ':' + n.rows.length + 'x' + n.ncols : n.type === 'repeater' ? 'R' + n.items.length + '(' + n.items.map(function (i) { return signature(i.nodes); }).join('|') + ')' : n.type[0] + n.path.join('.'); }).join(','); }
   function hasImages(root) {
     var found = false;
     (function w(e) { e.children.forEach(function (c) { if (found || SKIP[c.tag]) return; if (c.tag === 'img') { found = true; return; } w(c); }); })(root);
@@ -926,14 +1115,16 @@
     var scroll = S.body.scrollTop; src0 = S.src;
     var root = parse(S.src), nodes = collectAll(S.src, root);
     if (S.plus) S.plus.hidden = !hasImages(root);
+    var mc = maxCols(nodes); S.pw = mc >= 3 ? Math.min(560, 100 + mc * 112) : PANEL_W; S.panel.style.width = S.pw + 'px'; place();
     S.controls = []; S.body.textContent = ''; S.sig = signature(nodes);
     if (S.notice) S.body.appendChild(S.notice);
     if (!nodes.length) S.body.appendChild(h('div', { class: 'sqf-empty', text: S.src.trim() ? 'No editable text, links or images found in this code.' : 'This Code Block is empty. Add HTML and its fields appear here.' }));
-    var blocks = nodes.blocks || [], total = blocks.reduce(function (a, b) { return a + b.count; }, 0);
-    if (blocks.length >= 2 && (total > 8 || blocks.length > 3)) {          // long code: one section open at a time
-      if (!blocks.some(function (b) { return b.key === S.blk; }) && S.blk !== '') S.blk = blocks[0].key;
+    var blocks = nodes.blocks || [], fold = blocks.filter(function (b) { return !b.flat; }), total = fold.reduce(function (a, b) { return a + b.count; }, 0);
+    if (fold.length >= 2 && (total > 8 || fold.length > 3)) {              // long code: one section open at a time (tables stay open)
+      if (!fold.some(function (b) { return b.key === S.blk; }) && S.blk !== '') S.blk = fold[0].key;
       var boxes = [];
       blocks.forEach(function (b) {
+        if (b.flat) { renderNodes(b.nodes, S.src, root).forEach(function (n) { S.body.appendChild(n); }); boxes.push(null); return; }
         var bh = h('div', { role: 'button', tabindex: 0, class: 'sqf-bh', 'aria-expanded': b.key === S.blk }, [
           b.el ? h('span', { class: 'g', text: '⋮⋮', title: 'Drag to reorder' }) : null,
           h('span', { class: 'a', text: '▸' }),
@@ -948,7 +1139,7 @@
         });
         S.body.appendChild(box); boxes.push(box);
       });
-      var mv = blocks.map(function (b, i) { return { b: b, box: boxes[i] }; }).filter(function (x) { return x.b.el; });
+      var mv = blocks.map(function (b, i) { return { b: b, box: boxes[i] }; }).filter(function (x) { return x.b.el && x.box; });
       if (mv.length >= 2) {
         var why = orderCheck(S.src, root, mv.map(function (x) { return x.b.el; }));
         if (why) mv.forEach(function (x) { var g = x.box.querySelector('.sqf-bh .g'); if (g) g.remove(); });
@@ -1054,10 +1245,10 @@
   }
   function place() {
     if (!S.panel || !S.dialog) return;
-    var r = S.dialog.getBoundingClientRect(), W = shell.innerWidth, H = shell.innerHeight, left;
-    if (r.right + 12 + PANEL_W <= W) left = r.right + 12;
-    else if (r.left - 12 - PANEL_W >= 0) left = r.left - 12 - PANEL_W;
-    else left = W - PANEL_W - 8;
+    var PW = S.pw || PANEL_W, r = S.dialog.getBoundingClientRect(), W = shell.innerWidth, H = shell.innerHeight, left;
+    if (r.right + 12 + PW <= W) left = r.right + 12;
+    else if (r.left - 12 - PW >= 0) left = r.left - 12 - PW;
+    else left = Math.max(8, W - PW - 8);
     var top = Math.max(8, r.top), height = Math.max(240, Math.min(r.height || H - 16, H - top - 8));
     var st = S.panel.style; st.left = left + 'px'; st.top = top + 'px'; st.height = height + 'px';
     if (S.panel.parentNode !== SD.body && !S.verified) verifyMount(left, top);
